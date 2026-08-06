@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+# Fake stand-in for Infernal's cmemit, for integration-testing cmsimile's
+# subprocess plumbing and FASTA parsing without a real Infernal install.
+# Not a real emitter: derives a pattern from the CM filename so that CMs
+# with the same basename prefix "look similar", for smoke-test purposes.
+import sys, random, os
+
+args = sys.argv[1:]
+consensus = "-c" in args
+n = 1
+seed = 0
+cm_path = args[-1]
+if "-N" in args:
+    n = int(args[args.index("-N") + 1])
+if "--seed" in args:
+    seed = int(args[args.index("--seed") + 1])
+
+base = os.path.basename(cm_path).split(".")[0]
+rng = random.Random(hash(base) & 0xffffffff)
+pattern = "".join(rng.choice("ACGT") for _ in range(10))
+pattern = (pattern * 5)[:40]
+
+rng2 = random.Random(seed)
+
+def mutate(seq, k=3):
+    seq = list(seq)
+    for _ in range(k):
+        i = rng2.randrange(len(seq))
+        seq[i] = rng2.choice("ACGT")
+    return "".join(seq)
+
+count = 1 if consensus else n
+for i in range(count):
+    name = f"{base}_{'consensus' if consensus else 'sample'}_{i:04d}"
+    print(f">{name}")
+    print(pattern if consensus else mutate(pattern))

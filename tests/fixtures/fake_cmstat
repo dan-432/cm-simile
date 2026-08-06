@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+# Fake stand-in for Infernal's cmstat, for integration-testing the
+# Expander's multi-model listing without a real Infernal install. Expects
+# a synthetic multi-model CM file where each model block starts with a
+# line "NAME <name>" and ends with a line "//", loosely mirroring real
+# Infernal ASCII .cm file structure.
+import sys
+
+cm_path = sys.argv[-1]
+names = []
+with open(cm_path) as f:
+    for line in f:
+        if line.startswith("NAME"):
+            names.append(line.split()[1])
+
+print("# idx   name                 accession  nseq  eff_nseq   clen")
+print("# ----  -------------------- ---------- ----- --------- -----")
+for i, name in enumerate(names, start=1):
+    print(f"{i:<6}{name:<22}-             1        1.0   50")

@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+# Fake stand-in for Infernal's cmfetch, for integration-testing the
+# Expander without a real Infernal install. Supports:
+#   cmfetch --index <cmPath>        -> touches <cmPath>.ssi
+#   cmfetch <cmPath> <modelName>    -> prints that model's block to stdout
+import sys
+
+args = sys.argv[1:]
+
+if args[0] == "--index":
+    cm_path = args[1]
+    open(cm_path + ".ssi", "w").close()
+    print("[ok: fake index built]", file=sys.stderr)
+    sys.exit(0)
+
+cm_path, name = args[0], args[1]
+in_block = False
+with open(cm_path) as f:
+    for line in f:
+        if line.startswith("NAME"):
+            in_block = line.split()[1] == name
+        if in_block:
+            sys.stdout.write(line)
+        if line.strip() == "//":
+            in_block = False

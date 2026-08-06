@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+# Fake stand-in for Infernal's cmsearch, for integration-testing
+# cmsimile's subprocess plumbing and --tblout parsing without a real
+# Infernal install. Emits rows in the real, documented 18-column
+# --tblout layout (target name in column 0, score in column 14), derived
+# from the same synthetic per-model "pattern" fake_cmemit uses, so scores
+# are a meaningful stand-in for real CM bit scores.
+import sys, os, random
+
+args = sys.argv[1:]
+tblout_path = args[args.index("--tblout") + 1]
+cm_path = args[-2]
+fasta_path = args[-1]
+
+base = os.path.basename(cm_path).split(".")[0]
+rng = random.Random(hash(base) & 0xffffffff)
+pattern = "".join(rng.choice("ACGT") for _ in range(10))
+pattern = (pattern * 5)[:40]
+
+def parse_fasta(path):
+    records = []
+    name, seq = None, []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if name is not None:
+                    records.append((name, "".join(seq)))
+                name, seq = line[1:], []
+            else:
+                seq.append(line)
+    if name is not None:
+        records.append((name, "".join(seq)))
+    return records
+
+with open(tblout_path, "w") as out:
+    out.write("#target name         accession query name           accession mdl mdl from mdl to seq from seq to strand trunc pass   gc  bias  score  E-value inc description\n")
+    for name, seq in parse_fasta(fasta_path):
+        n = min(len(seq), len(pattern))
+        matches = sum(1 for a, b in zip(seq[:n], pattern[:n]) if a == b)
+        bitscore = matches * 2.5 - 50  # allow negative scores, like a real CM would for a poor match
+        evalue = 1.0
+        fields = [
+            name, "-", base, "-", "cm", "1", str(n), "1", str(n), "+", "no", "1",
+            "0.50", "0.0", f"{bitscore:.2f}", f"{evalue:.2g}", "!", "synthetic_hit",
+        ]
+        out.write(" ".join(fields) + "\n")
+
+print("[ok]", file=sys.stderr)
