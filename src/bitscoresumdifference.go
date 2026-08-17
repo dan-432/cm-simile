@@ -85,10 +85,16 @@ func runBitscoresumdifference() error {
 	flag.Var(&cmFiles, "cm-file", "path to a (possibly multi-model) CM file, e.g. data/Rfam.cm; every named model inside is expanded automatically. Repeat to combine multiple files")
 	query := flag.String("query", "", "comma-separated model names to restrict reported pairs to (default: report every pair)")
 	nPool := flag.Int("npool", 200, "real sequences sampled per model via cmemit")
-	nShuffles := flag.Int("nshuffles", 200, "dinucleotide-shuffle null replicates per pair")
+	nShuffles := flag.Int("nshuffles", 200, "bootstrap resamples per pair, drawn in-memory from the null reservoir (cheap -- see -reservoir-* flags; no longer drives cmsearch call count the way it used to)")
+	resampleSize := flag.Int("resample-size", 0, "size of each bootstrap draw from the null reservoir; defaults to -npool if 0, keeping null and real means on the same sample size")
+	reservoirMin := flag.Int("reservoir-min", 500, "starting size of the null reservoir per model (also the floor -resample-size must not exceed)")
+	reservoirMax := flag.Int("reservoir-max", 8000, "cap on reservoir growth; a model hitting this without its convergence diagnostic stabilizing gets a printed warning rather than silently proceeding")
+	reservoirTolerance := flag.Float64("reservoir-tolerance", 0.02, "max relative change in the convergence diagnostic between doubling rounds that counts as converged")
+	diagnosticResamples := flag.Int("diagnostic-resamples", 200, "bootstrap resamples used only to test reservoir convergence each round (separate from, usually smaller than, -nshuffles)")
 	seed := flag.Int64("seed", 42, "base random seed (deterministic reproducibility across runs)")
 	threads := flag.Int("threads", 4, "max concurrent cmemit/cmsearch subprocess calls dispatched at once")
 	outPath := flag.String("out", "", "output TSV path (default: stdout)")
+	dumpMatricesDir := flag.String("dump-matrices", "", "if set, write the full real-pool and null-reservoir (sequence x model) score matrices as long-format TSVs to this directory -- e.g. for plotting the null distribution's actual shape")
 
 	cmemitBin := flag.String("cmemit-bin", "", "path to cmemit binary (default: resolve \"cmemit\" from PATH)")
 	cmsearchBin := flag.String("cmsearch-bin", "", "path to cmsearch binary (default: resolve \"cmsearch\" from PATH)")
@@ -147,9 +153,17 @@ func runBitscoresumdifference() error {
 		Query:     queryFilter,
 		NPool:     *nPool,
 		NShuffles: *nShuffles,
-		Seed:      *seed,
-		Threads:   *threads,
-		Emitter:   infernal.Emitter{BinPath: *cmemitBin},
+		Reservoir: pipeline.ReservoirConfig{
+			ResampleSize:        *resampleSize,
+			ReservoirMin:        *reservoirMin,
+			ReservoirMax:        *reservoirMax,
+			ReservoirTolerance:  *reservoirTolerance,
+			DiagnosticResamples: *diagnosticResamples,
+		},
+		Seed:            *seed,
+		Threads:         *threads,
+		DumpMatricesDir: *dumpMatricesDir,
+		Emitter:         infernal.Emitter{BinPath: *cmemitBin},
 		Scorer: infernal.Scorer{
 			BinPath:        *cmsearchBin,
 			CPU:            *cmsearchCPU,
@@ -165,9 +179,12 @@ func runBitscoresumdifference() error {
 		cfg.OnProgress = pb.onProgress
 	}
 
-	results, err := pipeline.Run(context.Background(), cfg)
+	results, warnings, err := pipeline.Run(context.Background(), cfg)
 	if err != nil {
 		return err
+	}
+	for _, w := range warnings {
+		fmt.Fprintln(os.Stderr, "bitscoresumdifference: warning:", w)
 	}
 
 	out := os.Stdout
@@ -204,19 +221,25 @@ func printOverview(w *os.File, cfg pipeline.Config) {
 	} else {
 		fmt.Fprintf(w, "Pairs to report:  %d\n", est.NPairsTotal)
 	}
-	fmt.Fprintf(w, "npool=%d  nshuffles=%d  seed=%d  threads=%d\n",
+	fmt.Fprintf(w, "npool=%d  nshuffles=%d (bootstrap resamples, cheap)  seed=%d  threads=%d\n",
 		cfg.NPool, cfg.NShuffles, cfg.Seed, cfg.Threads)
+	fmt.Fprintf(w, "reservoir: min=%d max=%d tolerance=%.4f\n",
+		cfg.Reservoir.ReservoirMin, cfg.Reservoir.ReservoirMax, cfg.Reservoir.ReservoirTolerance)
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "Estimated subprocess calls:")
-	fmt.Fprintf(w, "  cmemit   (sampling):        %d\n", est.CmemitCalls)
-	fmt.Fprintf(w, "  cmsearch (real pool):       %d\n", est.CmsearchCallsReal)
-	fmt.Fprintf(w, "  cmsearch (null replicates): %d  (= %d models x %d shuffles)\n", est.CmsearchCallsNull, est.NModels, cfg.NShuffles)
+	fmt.Fprintln(w, "Estimated subprocess calls (reservoir cost is a RANGE, not exact --")
+	fmt.Fprintln(w, "growth is adaptive and stops once the convergence diagnostic")
+	fmt.Fprintln(w, "stabilizes, which depends on the actual score data):")
+	fmt.Fprintf(w, "  cmemit   (sampling):            %d\n", est.CmemitCalls)
+	fmt.Fprintf(w, "  cmsearch (real pool):            %d\n", est.CmsearchCallsReal)
+	fmt.Fprintf(w, "  cmsearch (null reservoir):        %d (best case, converges round 1) .. %d (worst case, hits reservoir-max)\n",
+		est.CmsearchCallsReservoirBest, est.CmsearchCallsReservoirWorst)
 	fmt.Fprintf(w, "  ------------------------------------------------\n")
-	fmt.Fprintf(w, "  total cmsearch calls:       %d\n", est.CmsearchCallsTotal)
+	fmt.Fprintf(w, "  total cmsearch calls:            %d .. %d\n", est.CmsearchCallsTotalBest, est.CmsearchCallsTotalWorst)
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "Note: call count is linear in model count, but each call scores the")
-	fmt.Fprintln(w, "whole pool for that stage, so total scoring work is O(models^2 x npool")
-	fmt.Fprintln(w, "x (1+nshuffles)) -- see README for the full complexity discussion.")
+	fmt.Fprintln(w, "Note: call count is linear in model count either way, but each call scores")
+	fmt.Fprintln(w, "the whole pool for that stage, so total scoring work is O(models^2 x npool)")
+	fmt.Fprintln(w, "-- nshuffles no longer multiplies this (bootstrap resampling from the")
+	fmt.Fprintln(w, "reservoir is in-memory, not a subprocess call) -- see README for details.")
 	fmt.Fprintln(w, "")
 }
 
@@ -233,7 +256,22 @@ type progressBar struct {
 var stageLabels = map[string]string{
 	"sampling":     "Sampling sequences (cmemit)",
 	"scoring_real": "Scoring real pool (cmsearch)",
-	"scoring_null": "Scoring null replicates (cmsearch)",
+}
+
+// labelFor returns a human label for a pipeline stage. Reservoir growth
+// stages are named "scoring_reservoir_round_N" (N not known upfront,
+// since growth is adaptive -- see pipeline.Config.OnProgress's doc
+// comment), so those get a prefix match rather than an exact-match
+// lookup; anything else falls back to the raw stage string.
+func labelFor(stage string) string {
+	if label, ok := stageLabels[stage]; ok {
+		return label
+	}
+	if strings.HasPrefix(stage, "scoring_reservoir_round_") {
+		round := strings.TrimPrefix(stage, "scoring_reservoir_round_")
+		return fmt.Sprintf("Scoring null reservoir, round %s (cmsearch)", round)
+	}
+	return stage
 }
 
 func newProgressBar(w *os.File) *progressBar {
@@ -249,10 +287,7 @@ func (p *progressBar) onProgress(stage string, completed, total int) {
 	}
 	p.currentStage = stage
 
-	label := stageLabels[stage]
-	if label == "" {
-		label = stage
-	}
+	label := labelFor(stage)
 
 	const barWidth = 30
 	frac := 0.0

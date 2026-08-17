@@ -15,10 +15,7 @@ import (
 //
 // The two directional statistics answer different questions and are kept
 // separate rather than collapsed into one symmetric number:
-//   - StatAintoB = mean score of A's real sequences against B, minus mean
-//     score of A's real sequences against A itself. Near zero means B
-//     recognises A's typical output about as well as A does; very
-//     negative means B does not recognise A's sequences.
+//   - StatAintoB = median score of A's real sequences against B
 //   - StatBintoA is the same computation in the other direction.
 //
 // A pair where both directions are near zero AND both p-values are small
@@ -32,13 +29,13 @@ import (
 type PairStat struct {
 	ModelA, ModelB string
 
-	// MeanScoreAonA is A's real pool scored against A (i.e. against
-	// itself); MeanScoreAonB is A's real pool scored against B; and so on.
-	MeanScoreAonA, MeanScoreAonB float64
-	MeanScoreBonB, MeanScoreBonA float64
+	// MedianScoreAonA is A's real pool scored against A (i.e. against
+	// itself); MedianScoreAonB is A's real pool scored against B; and so on.
+	MedianScoreAonA, MedianScoreAonB float64
+	MedianScoreBonB, MedianScoreBonA float64
 
-	StatAintoB float64 // mean(A on B) - mean(A on A)
-	StatBintoA float64 // mean(B on A) - mean(B on B)
+	StatAintoB float64 // median(A on B)
+	StatBintoA float64 // median(B on A)
 
 	// PValueAintoB is the fraction of null replicates whose shuffled-A
 	// scored-on-B statistic is >= the observed StatAintoB (one-sided:
@@ -70,37 +67,37 @@ func ComputePairStat(pool *seqpool.Pool, real *matrix.ScoreMatrix, modelA, model
 		return PairStat{}, fmt.Errorf("stats: no real pool sequences found for model %q", modelB)
 	}
 
-	meanAonA, err := real.MeanFor(idsA, modelA)
+	medianAonA, err := real.MedianFor(idsA, modelA)
 	if err != nil {
 		return PairStat{}, err
 	}
-	meanAonB, err := real.MeanFor(idsA, modelB)
+	medianAonB, err := real.MedianFor(idsA, modelB)
 	if err != nil {
 		return PairStat{}, err
 	}
-	meanBonB, err := real.MeanFor(idsB, modelB)
+	medianBonB, err := real.MedianFor(idsB, modelB)
 	if err != nil {
 		return PairStat{}, err
 	}
-	meanBonA, err := real.MeanFor(idsB, modelA)
+	medianBonA, err := real.MedianFor(idsB, modelA)
 	if err != nil {
 		return PairStat{}, err
 	}
 
-	statAintoB := meanAonB - meanAonA
-	statBintoA := meanBonA - meanBonB
+	statAintoB := medianAonB
+	statBintoA := medianBonA
 
 	if len(nullAonB) != len(nullBonA) {
 		return PairStat{}, fmt.Errorf("stats: mismatched null replicate counts (%d vs %d)", len(nullAonB), len(nullBonA))
 	}
 
-	pAintoB := empiricalPValue(statAintoB, nullAonB, meanAonA)
-	pBintoA := empiricalPValue(statBintoA, nullBonA, meanBonB)
+	pAintoB := empiricalPValue(statAintoB, nullAonB)
+	pBintoA := empiricalPValue(statBintoA, nullBonA)
 
 	return PairStat{
 		ModelA: modelA, ModelB: modelB,
-		MeanScoreAonA: meanAonA, MeanScoreAonB: meanAonB,
-		MeanScoreBonB: meanBonB, MeanScoreBonA: meanBonA,
+		MedianScoreAonA: medianAonA, MedianScoreAonB: medianAonB,
+		MedianScoreBonB: medianBonB, MedianScoreBonA: medianBonA,
 		StatAintoB: statAintoB, StatBintoA: statBintoA,
 		PValueAintoB: pAintoB, PValueBintoA: pBintoA,
 		NShuffles: len(nullAonB),
@@ -108,24 +105,24 @@ func ComputePairStat(pool *seqpool.Pool, real *matrix.ScoreMatrix, modelA, model
 }
 
 // empiricalPValue computes the one-sided empirical p-value: the fraction
-// of null replicate statistics (each: mean shuffled-cross-score minus the
+// of null replicate statistics (each: median shuffled-cross-score minus the
 // real self-score baseline) that are >= the observed statistic. Using the
 // same real self-score baseline for both observed and null statistics
 // keeps them on the same scale, since only the "cross" side of the
 // subtraction differs between the real and shuffled cases.
 //
-// nullCrossScores are per-replicate mean scores of the shuffled pool
+// nullCrossScores are per-replicate median scores of the shuffled pool
 // against the *other* model (e.g. shuffled-A scored against B); selfBaseline
-// is the real self-score mean (e.g. real-A scored against A) used to form
+// is the real self-score median (e.g. real-A scored against A) used to form
 // each null replicate's statistic the same way the observed statistic was
 // formed.
-func empiricalPValue(observedStat float64, nullCrossScores []float64, selfBaseline float64) float64 {
+func empiricalPValue(observedStat float64, nullCrossScores []float64) float64 {
 	if len(nullCrossScores) == 0 {
 		return 1.0 // no null replicates: cannot reject, maximally conservative
 	}
 	countAtLeastAsExtreme := 0
 	for _, crossScore := range nullCrossScores {
-		nullStat := crossScore - selfBaseline
+		nullStat := crossScore
 		if nullStat >= observedStat {
 			countAtLeastAsExtreme++
 		}

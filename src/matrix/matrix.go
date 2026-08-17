@@ -5,7 +5,10 @@
 // pairs being compared.
 package matrix
 
-import "fmt"
+import (
+	"sort"
+	"fmt"
+)
 
 // ScoreMatrix holds bit scores for a pool of sequences scored against a
 // set of covariance models: Scores[seqID][modelName] = bit score. It is
@@ -60,6 +63,25 @@ func (m *ScoreMatrix) MustGet(seqID, model string) (float64, error) {
 	return sc, nil
 }
 
+// Row returns a copy of the score map for one sequence -- model name ->
+// bit score, for every model that sequence has been scored against.
+// Returns nil if the sequence has no recorded scores. A copy (not the
+// internal map) is returned so callers can't accidentally mutate matrix
+// state through it. Used for dumping full score matrices (see
+// pipeline.DumpMatrices) without needing a caller to already know which
+// models a given sequence was scored against.
+func (m *ScoreMatrix) Row(seqID string) map[string]float64 {
+	row, ok := m.scores[seqID]
+	if !ok {
+		return nil
+	}
+	out := make(map[string]float64, len(row))
+	for k, v := range row {
+		out[k] = v
+	}
+	return out
+}
+
 // MeanFor computes the mean bit score, against model, of the sequences in
 // seqIDs. Returns an error if any sequence lacks a score against model
 // (a scoring gap should surface loudly, not silently skew the mean over
@@ -78,3 +100,28 @@ func (m *ScoreMatrix) MeanFor(seqIDs []string, model string) (float64, error) {
 	}
 	return sum / float64(len(seqIDs)), nil
 }
+
+// MedianFor computes the median bit score, against model, of the sequences in
+// seqIDs. Returns an error if any sequence lacks a score against model
+// (a scoring gap should surface loudly, not silently skew the median over
+// fewer sequences than intended).
+func (m *ScoreMatrix) MedianFor(seqIDs []string, model string) (float64, error) {
+	if len(seqIDs) == 0 {
+		return 0, fmt.Errorf("matrix: MedianFor called with no sequence IDs")
+	}
+	var scores []float64
+	for _, id := range seqIDs {
+		sc, err := m.MustGet(id, model)
+		if err != nil {
+			return 0, err
+		}
+		scores = append(scores, sc)
+	}
+	sort.Float64s(scores)
+	n := len(scores)
+	if n%2 == 1 {
+		return scores[n/2], nil
+	}
+	return (scores[n/2-1] + scores[n/2]) / 2, nil
+}
+

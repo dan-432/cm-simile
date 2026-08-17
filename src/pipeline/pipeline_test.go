@@ -94,6 +94,19 @@ func matchScore(seq, reference string) float64 {
 	return float64(matches) * 2.5 // arbitrary scale, bit-score-ish magnitude
 }
 
+// testReservoir returns a ReservoirConfig sized to converge quickly in
+// tests: a small, loose tolerance so the adaptive growth loop in
+// reservoir.go doesn't need many rounds against these tiny fake pools.
+func testReservoir(npool int) ReservoirConfig {
+	return ReservoirConfig{
+		ResampleSize:        npool,
+		ReservoirMin:        npool,
+		ReservoirMax:        npool * 8,
+		ReservoirTolerance:  0.25,
+		DiagnosticResamples: 30,
+	}
+}
+
 func TestPipeline_SimilarModelsScoreLowPValue(t *testing.T) {
 	// modelA and modelB share the same underlying pattern (i.e. are
 	// "the same family" in this synthetic setup); modelC is unrelated.
@@ -111,15 +124,19 @@ func TestPipeline_SimilarModelsScoreLowPValue(t *testing.T) {
 		},
 		NPool:     50,
 		NShuffles: 50,
+		Reservoir: testReservoir(50),
 		Seed:      1,
 		Threads:   4,
 		Emitter:   fakeEmitter{basePattern: basePattern},
 		Scorer:    fakeScorer{basePattern: basePattern},
 	}
 
-	results, err := Run(context.Background(), cfg)
+	results, warnings, err := Run(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
+	}
+	for _, w := range warnings {
+		t.Logf("warning: %s", w)
 	}
 	if len(results) != 3 {
 		t.Fatalf("expected 3 pairs (A-B, A-C, B-C), got %d", len(results))
@@ -182,13 +199,14 @@ func TestPipeline_QueryFiltersReportedPairs(t *testing.T) {
 		Query:     map[string]bool{"modelA": true},
 		NPool:     20,
 		NShuffles: 20,
+		Reservoir: testReservoir(20),
 		Seed:      2,
 		Threads:   4,
 		Emitter:   fakeEmitter{basePattern: basePattern},
 		Scorer:    fakeScorer{basePattern: basePattern},
 	}
 
-	results, err := Run(context.Background(), cfg)
+	results, _, err := Run(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
@@ -209,12 +227,76 @@ func TestPipeline_RejectsTooFewModels(t *testing.T) {
 		Models:    []Model{{Name: "onlyOne", Path: "x"}},
 		NPool:     10,
 		NShuffles: 10,
+		Reservoir: testReservoir(10),
 		Seed:      1,
 		Threads:   1,
 		Emitter:   fakeEmitter{basePattern: map[string]string{}},
 		Scorer:    fakeScorer{basePattern: map[string]string{}},
 	}
-	if _, err := Run(context.Background(), cfg); err == nil {
+	if _, _, err := Run(context.Background(), cfg); err == nil {
 		t.Error("expected error for < 2 models, got nil")
+	}
+}
+
+func TestPipeline_ReservoirConverges(t *testing.T) {
+	// A direct test of buildReservoir itself: confirms growth actually
+	// stops (doesn't run away to ReservoirMax) when scores are
+	// well-behaved, and that the resulting reservoir is usable -- every
+	// model's reservoir sequences have recorded scores against every
+	// other model.
+	basePattern := map[string]string{
+		"modelA": "ACGTACGTGG",
+		"modelB": "GGTTCCAAGG",
+	}
+	cfg := Config{
+		Models: []Model{
+			{Name: "modelA", Path: "modelA"},
+			{Name: "modelB", Path: "modelB"},
+		},
+		NPool:     30,
+		Reservoir: testReservoir(30),
+		Seed:      3,
+		Threads:   2,
+		Emitter:   fakeEmitter{basePattern: basePattern},
+		Scorer:    fakeScorer{basePattern: basePattern},
+	}
+
+	realPool, err := buildRealPool(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("buildRealPool failed: %v", err)
+	}
+
+	res, err := buildReservoir(context.Background(), cfg, realPool, cfg.Reservoir)
+	if err != nil {
+		t.Fatalf("buildReservoir failed: %v", err)
+	}
+
+	for _, m := range cfg.Models {
+		size := res.Sizes[m.Name]
+		if size < cfg.Reservoir.ReservoirMin {
+			t.Errorf("model %s: reservoir size %d is below ReservoirMin %d", m.Name, size, cfg.Reservoir.ReservoirMin)
+		}
+		if size > cfg.Reservoir.ReservoirMax {
+			t.Errorf("model %s: reservoir size %d exceeds ReservoirMax %d", m.Name, size, cfg.Reservoir.ReservoirMax)
+		}
+		t.Logf("model %s: reservoir converged at size %d after %d rounds", m.Name, size, res.Rounds[m.Name])
+	}
+
+	// Every reservoir sequence should have a recorded score against every
+	// other model (not necessarily against its own origin -- see the
+	// doc comment on why that's skipped).
+	for _, seq := range res.Pool.Sequences {
+		for _, target := range cfg.Models {
+			if target.Name == seq.Origin {
+				continue
+			}
+			if _, ok := res.Matrix.Get(seq.ID, target.Name); !ok {
+				t.Errorf("reservoir sequence %s (origin %s) missing score against %s", seq.ID, seq.Origin, target.Name)
+			}
+		}
+	}
+
+	if len(res.Warnings) > 0 {
+		t.Logf("warnings: %v", res.Warnings)
 	}
 }

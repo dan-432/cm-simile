@@ -4,7 +4,7 @@ Fast, statistically defensible estimation of sequence/structure similarity betwe
 
 Two standalone Go programs, both living in `src/`, sharing the same package infrastructure (`cmemit`/`cmsearch` wrappers, multi-model CM file expansion, dinucleotide shuffling):
 
-- **`bitscoresumdifference`** -- the primary, fast screening tool. Samples real sequences from each model, cross-scores them, and tests the observed directional mean bit-score difference against a dinucleotide-shuffled null distribution for a bootstrap p-value per pair. Batches cleanly across many models (O(N) subprocess calls, not O(N²)) -- this is the tool for screening large CM sets, e.g. novel motifs against all of Rfam.
+- **`bitscoresumdifference`** -- the primary, fast screening tool. Samples real sequences from each model, cross-scores them, and tests the observed directional median bit-score difference against a dinucleotide-shuffled null distribution for a bootstrap p-value per pair. Batches cleanly across many models (O(N) subprocess calls, not O(N²)) -- this is the tool for screening large CM sets, e.g. novel motifs against all of Rfam.
 - **`minmaxcmcompare`** -- the worst-case counterpart. Approximates CMCompare's exact MaxiMin score (the single sequence that scores as well as possible against *both* models at once) via an evolutionary search: seed a population from real `cmemit` samples, then mutate/crossover/select using `cmsearch` bit scores as the fitness function. Answers "does a single dangerous sequence exist that would confuse both models", which the distributional statistic can't. Costs meaningfully more per pair and doesn't batch the way the bootstrap tool does -- best used to confirm a handful of pairs `bitscoresumdifference` already flagged as significant, not to screen from scratch.
 
 ## Build
@@ -15,9 +15,7 @@ go build -o bin/bitscoresumdifference src/bitscoresumdifference.go
 go build -o bin/minmaxcmcompare src/minmaxcmcompare.go
 ```
 
-Note both files are `package main` with their own `func main`, living in the same `src/` directory as the shared packages (`src/infernal`, `src/pipeline`, etc.). 
-This means `go build ./...` / `go vet ./...` will fail specifically on `src` itself ("main redeclared") -- that's expected, not a bug: build and vet each program by naming its file explicitly, as above. 
-The shared packages underneath are ordinary Go packages and build/vet/test normally:
+Note both files are `package main` with their own `func main`, living in the same `src/` directory as the shared packages (`src/infernal`, `src/pipeline`, etc.). This means `go build ./...` / `go vet ./...` will fail specifically on `src` itself ("main redeclared") -- that's expected, not a bug: build and vet each program by naming its file explicitly, as above. The shared packages underneath are ordinary Go packages and build/vet/test normally:
 
 ```
 go vet ./src/infernal/... ./src/matrix/... ./src/output/... ./src/pipeline/... ./src/seqpool/... ./src/shuffle/... ./src/stats/...
@@ -31,7 +29,7 @@ Zero external Go dependencies (stdlib only), so this builds as a static binary a
 For a pair of covariance models CM_A and CM_B: does CM_B recognize sequences typical of CM_A (and vice versa) more than expected from base composition alone?
 
 ```
-INPUT: CM_A, CM_B, n_pool (real samples per model), n_shuffles (bootstrap reps)
+INPUT: CM_A, CM_B, n_pool (real samples per model), reservoir config, n_shuffles (bootstrap resamples)
 
 # --- Step 1: real sequence pools, one cmemit call per model ---
 poolA_real = cmemit -N n_pool CM_A
@@ -44,36 +42,51 @@ scoreB_on_B = cmsearch CM_B poolB_real
 scoreA_on_B = cmsearch CM_A poolB_real   # does A recognize B's sequences?
 
 # --- Step 3: directional overlap statistics ---
-stat_A_into_B = mean(scoreB_on_A) - mean(scoreA_on_A)
-stat_B_into_A = mean(scoreA_on_B) - mean(scoreB_on_B)
+stat_A_into_B = median(scoreB_on_A)
+stat_B_into_A = median(scoreA_on_B)
 # near 0        -> near-total mutual overlap
 # very negative -> little cross-recognition
 
-# --- Step 4: null distributions via dinucleotide-preserving shuffles ---
-for rep in 1..n_shuffles:
-    shuffledA = [dinuc_shuffle(seq) for seq in poolA_real]   # Altschul-Erikson algorithm
-    shuffledB = [dinuc_shuffle(seq) for seq in poolB_real]   # preserves dinuc freq, not naive shuffle
+# --- Step 4: build ONE null reservoir per model, ONCE, shared across every pair ---
+for each model M:
+    reservoir_M = []
+    round = 0
+    while not converged(M):
+        target_size = reservoir_min * 2^round
+        new_shuffled = [dinuc_shuffle(seq) for seq in poolM_real]   # repeated with fresh
+                                                                      # seeds until target_size reached
+        reservoir_M += new_shuffled
+        score reservoir_M's NEW additions against EVERY model (batched, same trick as poolM_real)
+        # convergence: bootstrap-resample the reservoir at n_pool-sized draws,
+        # track the 5th-percentile of resampled means per target model;
+        # stop growing once that stabilizes within tolerance, or reservoir_max is hit
+        round += 1
 
-    null_B_on_shuffledA[rep] = mean(cmsearch CM_B shuffledA)
-    null_A_on_shuffledB[rep] = mean(cmsearch CM_A shuffledB)
+# --- Step 5: per pair, draw null replicates from the ALREADY-SCORED reservoir -- no more cmsearch calls ---
+null_B_on_shuffledA[1..n_shuffles] = bootstrap-resample means of size n_pool from reservoir_A's
+                                      precomputed scores against CM_B
+null_A_on_shuffledB[1..n_shuffles] = likewise, reservoir_B's scores against CM_A
 
-# --- Step 5: empirical p-values ---
-p_A_into_B = fraction(null_B_on_shuffledA >= mean(scoreB_on_A))
-p_B_into_A = fraction(null_A_on_shuffledB >= mean(scoreA_on_B))
+# --- Step 6: empirical p-values ---
+p_A_into_B = fraction(null_B_on_shuffledA >= median(scoreB_on_A))
+p_B_into_A = fraction(null_A_on_shuffledB >= median(scoreA_on_B))
 
-# --- Step 6: interpretation ---
+# --- Step 7: interpretation ---
 # both directions significant, stat_* near 0  -> models are essentially redundant
 # only one direction significant              -> asymmetric containment (subset/superset)
 # neither significant                          -> models capture independent signal
 ```
 
-**Scoring via `cmsearch`, not `cmscore`.** `cmsearch --tblout` has a stable, documented 18-column layout (see the Infernal user guide's "tabular output" section), unlike `cmscore`'s plain-text table, whose column layout has shifted across Infernal releases. Run with `--max` (disables acceleration filters, so every sequence -- including deliberately weak dinucleotide-shuffled ones -- is fully scored by the CM rather than possibly discarded by a pre-filter) and a low `-T` raw bit-score threshold (rather than an E-value threshold, since E-value depends on pool size and would shift differently between the real and shuffled passes).
+**Why a reservoir instead of shuffling fresh per replicate.** The original design re-shuffled and re-scored the whole pool for every one of `n_shuffles` replicates, making replicate count directly multiply `cmsearch` call count (`O(n_shuffles x models)`). Building one large, adaptively-sized reservoir per model *once*, scoring it once (batched across all models, same trick as the real pool), and then drawing `n_shuffles` bootstrap resamples from that already-scored reservoir *in memory* collapses null-generation cost back to roughly `O(models x log(reservoir_size))` -- independent of `n_shuffles`, which is now nearly free to increase. See `-reservoir-min`/`-reservoir-max`/`-reservoir-tolerance`/`-resample-size` in `bitscoresumdifference -h`.
 
-**Why dinucleotide shuffling.** CM bit scores are already partially composition-corrected internally, but not perfectly, especially for GC-skewed motifs. Dinucleotide shuffling (Altschul-Erikson, Eulerian-circuit-based) preserves local composition and dinucleotide frequency while destroying base-pairing complementarity and higher-order structure, isolating genuine shared structural/sequence signal from shared compositional bias.
+**Why the reservoir size is adaptive, not fixed.** A reservoir that's too small gives an unstable estimate of the null's tail behavior -- exactly the region a p-value threshold depends on -- which would quietly bias significance calls rather than erroring. Growth doubles each round and stops once a 5th-percentile bootstrap diagnostic stabilizes within tolerance (or `-reservoir-max` is hit, which prints a warning rather than silently proceeding on an under-validated reservoir).
+
+
+**Why dinucleotide shuffling.** CM bit scores are already partially composition-corrected internally, but not perfectly, especially for GC-skewed motifs. Dinucleotide shuffling (Altschul-Erikson, Eulerian-circuit-based) preserves local composition and dinucleotide frequency while destroying base-pairing complementarity and higher-order structure, isolating genuine shared structural/sequence signal from shared compositional bias. Worth knowing as a real limitation: this null controls for *composition*, not for whether a sequence has *any* real secondary structure at all -- a truly unrelated but well-folded ncRNA can still outscore its own shuffled self against an unrelated CM, simply because it has a fold and the shuffled version doesn't. A structure-preserving null (randomize paired-position identity while keeping the pairing itself) would isolate family-specific signal more cleanly; not yet implemented here.
 
 **Why directional statistics.** Scoring poolA-vs-B and poolB-vs-A separately, rather than collapsing to one symmetric number, detects asymmetric containment -- one model as a specialised subset of a broader one -- which a single similarity number can't distinguish from true bidirectional redundancy.
 
-**Cost.** Subprocess calls scale as `O(n_shuffles)` per pair (each replicate is one batched call over the full pool, not one call per sequence), and model pools/scores are built once and reused across all pairs, keeping total calls linear in the number of models rather than quadratic in the number of pairs.
+**Matrix output.** `-dump-matrices DIR` writes the full (sequence x model) score matrices for both the real pool and the null reservoir as long-format TSVs (`sequence_id, origin, model, score`) -- e.g. for plotting the null distribution's actual shape rather than only its summary statistics.
 
 **Relationship to exact/worst-case methods.** This is an approximation of the *distributional* question. For the *worst-case* question (does even one dangerous sequence exist), see `minmaxcmcompare` below, or [CMCompare](https://github.com/RaumZeit/CMCompare) itself for the exact analytic answer.
 
@@ -103,6 +116,10 @@ for generation in 1..generations:
 Independent sampling struggles to find the true maximin sequence because it's often a compromise point that's somewhat atypical of *both* models individually -- a low-probability region under either model's own emission distribution. Turning it into a directed search (using `cmsearch`'s bit score as a fitness oracle) converges toward that region much faster than blind sampling, at the cost of two `cmsearch` calls per generation per pair (still batched across the whole population, just not batched across pairs the way `bitscoresumdifference` is).
 
 The actual ceiling here is CMCompare's exact analytic solution (dynamic programming over the product of the two CMs' state graphs) -- this tool is a fast, good-enough approximation for triage, not a replacement for it.
+
+**Parallelism.** Pairs run concurrently, bounded by `-threads` (default 4). Within a single pair's refinement, each generation's scoring against model A and model B also runs concurrently -- so up to roughly `2 x threads` `cmsearch` processes can be in flight at once; reduce `-threads` if that's too much for your allocation.
+
+**Matrix output.** `-dump-matrix PATH` writes every candidate's scoreA/scoreB from each reported pair's *final* generation (long format: `model_a, model_b, candidate_id, seq, score_a, score_b`) -- the converged population the search actually found, not the full generation-by-generation trajectory.
 
 ## Experiments
 

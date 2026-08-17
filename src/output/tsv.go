@@ -13,8 +13,8 @@ import (
 func WriteTSV(w io.Writer, results []stats.PairStat) error {
 	header := []string{
 		"model_a", "model_b",
-		"mean_score_a_on_a", "mean_score_a_on_b",
-		"mean_score_b_on_b", "mean_score_b_on_a",
+		"median_score_a_on_a", "median_score_a_on_b",
+		"median_score_b_on_b", "median_score_b_on_a",
 		"stat_a_into_b", "stat_b_into_a",
 		"pvalue_a_into_b", "pvalue_b_into_a",
 		"n_shuffles",
@@ -25,8 +25,8 @@ func WriteTSV(w io.Writer, results []stats.PairStat) error {
 	for _, r := range results {
 		row := []string{
 			r.ModelA, r.ModelB,
-			ftoa(r.MeanScoreAonA), ftoa(r.MeanScoreAonB),
-			ftoa(r.MeanScoreBonB), ftoa(r.MeanScoreBonA),
+			ftoa(r.MedianScoreAonA), ftoa(r.MedianScoreAonB),
+			ftoa(r.MedianScoreBonB), ftoa(r.MedianScoreBonA),
 			ftoa(r.StatAintoB), ftoa(r.StatBintoA),
 			ftoa(r.PValueAintoB), ftoa(r.PValueBintoA),
 			itoa(r.NShuffles),

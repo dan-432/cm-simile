@@ -15,7 +15,7 @@ import (
 // destroying higher-order structure -- base-pairing complementarity,
 // motif patterns, anything beyond local doublet composition.
 //
-// This is the null model cm-simile bootstraps against a covariance
+// This is the null model cm-simile bootstraps against: a covariance
 // model's bit score on a dinucleotide-shuffled sequence reflects what the
 // model would score for "typical composition, no real structural signal",
 // isolating genuine shared sequence/structure signal between two models

@@ -1,7 +1,10 @@
 // Package pipeline orchestrates the full cm-simile run: build one real
-// pool across all input models, score it once per model, generate
-// dinucleotide-shuffled null replicates and score those too, then slice
-// all pairwise statistics out of the resulting matrices.
+// pool across all input models, score it once per model, build an
+// adaptively-sized reservoir of dinucleotide-shuffled null sequences and
+// score that once too, then generate every pair's null distribution via
+// cheap in-memory bootstrap resampling from the reservoir (see
+// reservoir.go) and slice all pairwise statistics out of the resulting
+// matrices.
 //
 // This is deliberately N-way from the ground up rather than pairwise-first:
 // 1-to-1, bipartite (query set vs. reference set), and full many-to-many
@@ -23,7 +26,6 @@ import (
 
 	"cmsimile/src/matrix"
 	"cmsimile/src/seqpool"
-	"cmsimile/src/shuffle"
 	"cmsimile/src/stats"
 )
 
@@ -53,29 +55,49 @@ type Config struct {
 
 	// Query, if non-empty, restricts the *reported* pairs to those where
 	// at least one model's name is in Query. All supplied Models are
-	// still pooled and scored regardless - this only
+	// still pooled and scored regardless (see package doc) -- this only
 	// filters output, e.g. for a bipartite "a few novel motifs against
 	// all of Rfam" run where you only care about pairs touching your
 	// query motifs. Leave nil/empty to report every pair.
 	Query map[string]bool
 
-	NPool     int   // real sequences sampled per model
-	NShuffles int   // dinucleotide-shuffle null replicates
-	Seed      int64 // base seed; each model/replicate derives its own sub-seed from this for reproducibility
-	Threads   int   // max concurrent subprocess calls
+	NPool int // real sequences sampled per model
+
+	// NShuffles is now the number of bootstrap resamples drawn per pair
+	// from the (once-built, once-scored) null reservoir -- see
+	// reservoir.go. This is cheap: resampling is in-memory arithmetic,
+	// not a subprocess call, so NShuffles no longer drives cmsearch call
+	// count the way it did under the old per-replicate shuffle-and-
+	// rescore design. Reservoir construction cost is instead governed by
+	// Reservoir's own fields.
+	NShuffles int
+
+	Reservoir ReservoirConfig
+
+	Seed    int64 // base seed; each model/replicate derives its own sub-seed from this for reproducibility
+	Threads int   // max concurrent subprocess calls
 
 	Emitter Emitter
 	Scorer  Scorer
 
 	// OnProgress, if set, is called as work completes: once per cmemit
-	// sampling call, and once per cmsearch scoring call (both for the
-	// real pool and for each null-shuffle replicate). stage is one of
-	// "sampling", "scoring_real", "scoring_null". completed/total are
-	// cumulative within that stage across the whole run. Safe to call
-	// from multiple goroutines concurrently -- callers doing anything
-	// beyond simple, fast, thread-safe reporting (e.g. printing) should
-	// synchronize internally.
+	// sampling call, once per cmsearch scoring call for the real pool,
+	// and once per cmsearch scoring call for each reservoir growth round
+	// (stage name includes the round number, e.g.
+	// "scoring_reservoir_round_0", since the number of rounds is
+	// data-dependent and not known upfront). completed/total are
+	// cumulative within that stage. Safe to call from multiple
+	// goroutines concurrently -- callers doing anything beyond simple,
+	// fast, thread-safe reporting (e.g. printing) should synchronize
+	// internally.
 	OnProgress func(stage string, completed, total int)
+
+	// DumpMatricesDir, if non-empty, writes the real pool's and the null
+	// reservoir's full (sequence x model) score matrices to this
+	// directory as long-format TSVs -- e.g. for plotting the null
+	// distribution's shape directly, rather than only its summary
+	// statistics. See DumpMatrices in matrixdump.go.
+	DumpMatricesDir string
 }
 
 // WorkEstimate summarises how much subprocess-level work a Config implies,
@@ -84,14 +106,29 @@ type Config struct {
 // subprocess *call count* (linear in model count) and total *scoring
 // compute* (quadratic, since each call's pool grows with model count) are
 // different things worth showing separately.
+//
+// Reservoir cost is a RANGE, not an exact number, because reservoir.go's
+// growth is adaptive -- it stops once a convergence diagnostic
+// stabilizes, which depends on the actual score data, not just the
+// config. CmsearchCallsReservoirBest assumes every model converges after
+// the first round (ReservoirMin sequences, no growth needed);
+// CmsearchCallsReservoirWorst assumes every model grows all the way to
+// ReservoirMax without converging. Real runs should land somewhere
+// between the two -- printing a false-precision single number here would
+// misrepresent what's actually a data-dependent quantity.
 type WorkEstimate struct {
-	NModels            int
-	NPairsTotal        int // all pairs among NModels
-	NPairsReported     int // pairs surviving the Query filter
-	CmemitCalls        int // one per model
-	CmsearchCallsReal  int // one per model, scoring the real pool
-	CmsearchCallsNull  int // one per model per shuffle replicate
-	CmsearchCallsTotal int
+	NModels        int
+	NPairsTotal    int // all pairs among NModels
+	NPairsReported int // pairs surviving the Query filter
+	CmemitCalls    int // one per model
+
+	CmsearchCallsReal int // one per model, scoring the real pool
+
+	CmsearchCallsReservoirBest  int // best case: every model converges in round 1
+	CmsearchCallsReservoirWorst int // worst case: every model grows to ReservoirMax
+
+	CmsearchCallsTotalBest  int
+	CmsearchCallsTotalWorst int
 }
 
 // Estimate computes a WorkEstimate for cfg without running anything.
@@ -108,47 +145,67 @@ func Estimate(cfg Config) WorkEstimate {
 		}
 	}
 	cmsearchReal := n
-	cmsearchNull := n * cfg.NShuffles
+
+	best := n // one round, ReservoirMin sequences, every model converges immediately
+	worst := 0
+	if cfg.Reservoir.ReservoirMin > 0 && cfg.Reservoir.ReservoirMax >= cfg.Reservoir.ReservoirMin {
+		rounds := 1
+		size := cfg.Reservoir.ReservoirMin
+		for size < cfg.Reservoir.ReservoirMax {
+			size *= 2
+			rounds++
+		}
+		worst = n * rounds
+	}
+
 	return WorkEstimate{
-		NModels:            n,
-		NPairsTotal:        totalPairs,
-		NPairsReported:     reported,
-		CmemitCalls:        n,
-		CmsearchCallsReal:  cmsearchReal,
-		CmsearchCallsNull:  cmsearchNull,
-		CmsearchCallsTotal: cmsearchReal + cmsearchNull,
+		NModels:                     n,
+		NPairsTotal:                 totalPairs,
+		NPairsReported:              reported,
+		CmemitCalls:                 n,
+		CmsearchCallsReal:           cmsearchReal,
+		CmsearchCallsReservoirBest:  best,
+		CmsearchCallsReservoirWorst: worst,
+		CmsearchCallsTotalBest:      cmsearchReal + best,
+		CmsearchCallsTotalWorst:     cmsearchReal + worst,
 	}
 }
 
 // Run executes the full pipeline and returns one stats.PairStat per
-// reported pair, sorted by ascending min(p-value) (most significant
-// overlap first), with model-name pairs as a stable tie-break.
-func Run(ctx context.Context, cfg Config) ([]stats.PairStat, error) {
+// reported pair (sorted by ascending min(p-value), most significant
+// overlap first, with model-name pairs as a stable tie-break), plus any
+// warnings surfaced during reservoir construction (see
+// reservoirResult.Warnings) that are worth a human looking at even
+// though they didn't stop the run.
+func Run(ctx context.Context, cfg Config) ([]stats.PairStat, []string, error) {
 	if err := validate(cfg); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	realPool, err := buildRealPool(ctx, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("pipeline: building real pool: %w", err)
+		return nil, nil, fmt.Errorf("pipeline: building real pool: %w", err)
 	}
 
 	realMatrix, err := scorePoolAgainstAllModels(ctx, cfg, realPool, newTicker(cfg.OnProgress, "scoring_real", len(cfg.Models)))
 	if err != nil {
-		return nil, fmt.Errorf("pipeline: scoring real pool: %w", err)
+		return nil, nil, fmt.Errorf("pipeline: scoring real pool: %w", err)
 	}
 
-	// nullMeanCross[origin][scoredAgainst] = one mean-score value per
-	// shuffle replicate: the mean score of origin's shuffled sequences
-	// when scored against model `scoredAgainst`.
-	nullMeanCross, err := buildNullDistributions(ctx, cfg, realPool)
+	reservoir, err := buildReservoir(ctx, cfg, realPool, cfg.Reservoir)
 	if err != nil {
-		return nil, fmt.Errorf("pipeline: building null distributions: %w", err)
+		return nil, nil, fmt.Errorf("pipeline: building null reservoir: %w", err)
 	}
 
-	results, err := computeAllPairStats(cfg, realPool, realMatrix, nullMeanCross)
+	if cfg.DumpMatricesDir != "" {
+		if err := DumpMatrices(cfg.DumpMatricesDir, realPool, realMatrix, reservoir.Pool, reservoir.Matrix); err != nil {
+			return nil, nil, fmt.Errorf("pipeline: dumping matrices: %w", err)
+		}
+	}
+
+	results, err := computeAllPairStats(cfg, realPool, realMatrix, reservoir)
 	if err != nil {
-		return nil, fmt.Errorf("pipeline: computing pairwise statistics: %w", err)
+		return nil, nil, fmt.Errorf("pipeline: computing pairwise statistics: %w", err)
 	}
 
 	sort.Slice(results, func(i, j int) bool {
@@ -162,7 +219,7 @@ func Run(ctx context.Context, cfg Config) ([]stats.PairStat, error) {
 		}
 		return results[i].ModelB < results[j].ModelB
 	})
-	return results, nil
+	return results, reservoir.Warnings, nil
 }
 
 func validate(cfg Config) error {
@@ -187,6 +244,9 @@ func validate(cfg Config) error {
 	}
 	if cfg.Emitter == nil || cfg.Scorer == nil {
 		return fmt.Errorf("pipeline: Emitter and Scorer must be set")
+	}
+	if err := cfg.Reservoir.validate(cfg.NPool); err != nil {
+		return err
 	}
 	return nil
 }
@@ -276,77 +336,17 @@ func scorePoolAgainstAllModels(ctx context.Context, cfg Config, pool *seqpool.Po
 	return m, nil
 }
 
-// buildNullDistributions generates cfg.NShuffles dinucleotide-shuffled
-// replicates of realPool and scores each replicate against every model,
-// accumulating per-replicate mean cross-scores.
-//
-// Subprocess call count: O(NShuffles x len(Models)), the same linear-in-N
-// scaling as the real pool, multiplied by the number of replicates -- see
-// the README's cost discussion.
-func buildNullDistributions(ctx context.Context, cfg Config, realPool *seqpool.Pool) (map[string]map[string][]float64, error) {
-	// nullMeanCross[origin][scoredAgainst] = []float64, one entry per
-	// replicate. Pre-allocate outer maps; inner slices grow as replicates
-	// complete. Replicates run sequentially (each one's model-scoring
-	// step is itself parallelised across models), since shuffle
-	// replicates are cheap in Go-side compute and the expensive part
-	// (cmscore calls) is already parallelised within each replicate.
-	nullMeanCross := make(map[string]map[string][]float64)
-	origins := realPool.Origins()
-	for _, o := range origins {
-		nullMeanCross[o] = make(map[string][]float64)
-		for _, m := range cfg.Models {
-			nullMeanCross[o][m.Name] = make([]float64, 0, cfg.NShuffles)
-		}
-	}
+// (buildNullDistributions and shuffleWholePool, which used to live here,
+// are replaced entirely by reservoir.go's buildReservoir -- see the
+// package doc comment.)
 
-	nullTick := newTicker(cfg.OnProgress, "scoring_null", len(cfg.Models)*cfg.NShuffles)
-
-	for rep := 0; rep < cfg.NShuffles; rep++ {
-		repSeed := cfg.Seed + 7_000_003 + int64(rep)*1_000_033
-		shuffledPool, err := shuffleWholePool(realPool, repSeed)
-		if err != nil {
-			return nil, fmt.Errorf("shuffle replicate %d: %w", rep, err)
-		}
-
-		repMatrix, err := scorePoolAgainstAllModels(ctx, cfg, shuffledPool, nullTick)
-		if err != nil {
-			return nil, fmt.Errorf("shuffle replicate %d: %w", rep, err)
-		}
-
-		for _, o := range origins {
-			idsO := idsOf(shuffledPool.ByOrigin(o))
-			for _, m := range cfg.Models {
-				mean, err := repMatrix.MeanFor(idsO, m.Name)
-				if err != nil {
-					return nil, fmt.Errorf("shuffle replicate %d: %w", rep, err)
-				}
-				nullMeanCross[o][m.Name] = append(nullMeanCross[o][m.Name], mean)
-			}
-		}
-	}
-	return nullMeanCross, nil
-}
-
-// shuffleWholePool dinucleotide-shuffles every sequence in pool
-// independently, preserving IDs and Origins (so downstream lookups by ID
-// still work against the shuffled pool exactly as they do against the
-// real one) but randomising residues.
-func shuffleWholePool(pool *seqpool.Pool, seed int64) (*seqpool.Pool, error) {
-	rng := rand.New(rand.NewSource(seed))
-	out := &seqpool.Pool{}
-	for _, s := range pool.Sequences {
-		shuffled, err := shuffle.DinucleotideShuffle(s.Residues, rng)
-		if err != nil {
-			return nil, fmt.Errorf("shuffling sequence %q: %w", s.ID, err)
-		}
-		out.Add(seqpool.Sequence{ID: s.ID, Origin: s.Origin, Residues: shuffled})
-	}
-	return out, nil
-}
-
-// computeAllPairStats slices the real matrix and null distributions into
-// one stats.PairStat per reported pair.
-func computeAllPairStats(cfg Config, realPool *seqpool.Pool, realMatrix *matrix.ScoreMatrix, nullMeanCross map[string]map[string][]float64) ([]stats.PairStat, error) {
+// computeAllPairStats slices the real matrix and bootstrap-resamples null
+// replicates from the reservoir for each reported pair. Resampling is
+// pure in-memory arithmetic (bootstrapMeans in reservoir.go) -- this is
+// the payoff of the reservoir redesign: no cmsearch calls happen in this
+// function at all, regardless of NShuffles.
+func computeAllPairStats(cfg Config, realPool *seqpool.Pool, realMatrix *matrix.ScoreMatrix, reservoir *reservoirResult) ([]stats.PairStat, error) {
+	resampleSize := cfg.Reservoir.resampleSize(cfg.NPool)
 	var results []stats.PairStat
 	for i := 0; i < len(cfg.Models); i++ {
 		for j := i + 1; j < len(cfg.Models); j++ {
@@ -354,8 +354,18 @@ func computeAllPairStats(cfg Config, realPool *seqpool.Pool, realMatrix *matrix.
 			if len(cfg.Query) > 0 && !cfg.Query[a] && !cfg.Query[b] {
 				continue // neither side of this pair is a queried model
 			}
-			nullAonB := nullMeanCross[a][b]
-			nullBonA := nullMeanCross[b][a]
+
+			// Deterministic, pair-specific RNG seed so results are
+			// reproducible given the same base Seed, independent of any
+			// map/goroutine iteration order elsewhere in the pipeline.
+			pairSeed := cfg.Seed + 5_000_011 + int64(i)*97 + int64(j)*10_007
+			rng := rand.New(rand.NewSource(pairSeed))
+
+			idsA := idsOf(reservoir.Pool.ByOrigin(a))
+			idsB := idsOf(reservoir.Pool.ByOrigin(b))
+			nullAonB := bootstrapMedians(reservoir.Matrix, idsA, b, resampleSize, cfg.NShuffles, rng)
+			nullBonA := bootstrapMedians(reservoir.Matrix, idsB, a, resampleSize, cfg.NShuffles, rng)
+
 			ps, err := stats.ComputePairStat(realPool, realMatrix, a, b, nullAonB, nullBonA)
 			if err != nil {
 				return nil, fmt.Errorf("pair (%s, %s): %w", a, b, err)

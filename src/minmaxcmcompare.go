@@ -42,6 +42,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 
 	"cmsimile/src/infernal"
 	"cmsimile/src/seqpool"
@@ -99,7 +100,9 @@ func runMinmaxcmcompare() error {
 	crossoverProb := flag.Float64("crossover-prob", 0.3, "probability a child is produced by crossing two survivors rather than mutating one")
 
 	seed := flag.Int64("seed", 42, "base random seed (deterministic reproducibility across runs)")
+	threads := flag.Int("threads", 4, "max concurrent pair refinements dispatched at once (each refinement itself makes 2 concurrent cmsearch calls per generation, one per model, so up to ~2x this many cmsearch processes can be in flight at once)")
 	outPath := flag.String("out", "", "output TSV path (default: stdout)")
+	dumpMatrixPath := flag.String("dump-matrix", "", "if set, write the FINAL generation's population -- every candidate's scoreA/scoreB from the last completed round, for every reported pair -- to this long-format TSV")
 
 	cmemitBin := flag.String("cmemit-bin", "", "path to cmemit binary (default: resolve \"cmemit\" from PATH)")
 	cmsearchBin := flag.String("cmsearch-bin", "", "path to cmsearch binary (default: resolve \"cmsearch\" from PATH)")
@@ -175,45 +178,81 @@ func runMinmaxcmcompare() error {
 		selfScores[m.Name] = pool.meanSelfScore
 	}
 
-	var rows []resultRow
+	// Build the list of pairs to actually run, up front, so they can be
+	// dispatched across a bounded worker pool rather than run strictly
+	// one at a time.
+	type pairJob struct{ i, j int }
+	var jobs []pairJob
 	for i := 0; i < len(models); i++ {
 		for j := i + 1; j < len(models); j++ {
 			a, b := models[i], models[j]
 			if len(queryFilter) > 0 && !queryFilter[a.Name] && !queryFilter[b.Name] {
 				continue
 			}
-			fmt.Fprintf(os.Stderr, "minmaxcmcompare: refining %s vs %s ...\n", a.Name, b.Name)
-
-			pairSeed := *seed + int64(i)*7_919 + int64(j)*104_729
-			result, err := refineMaximin(ctx, emitter, scorer, a, b,
-				seedPools[a.Name], seedPools[b.Name],
-				refineConfig{
-					PopSize:           *popSize,
-					Generations:       *generations,
-					SurvivalFrac:      *survivalFrac,
-					MutationsPerChild: *mutationsPerChild,
-					CrossoverProb:     *crossoverProb,
-					Seed:              pairSeed,
-				})
-			if err != nil {
-				return fmt.Errorf("refining pair (%s, %s): %w", a.Name, b.Name, err)
-			}
-
-			baseline := (selfScores[a.Name] + selfScores[b.Name]) / 2.0
-			similarity := 0.0
-			if baseline != 0 {
-				similarity = result.BestFitness / baseline
-			}
-
-			rows = append(rows, resultRow{
-				ModelA: a.Name, ModelB: b.Name,
-				EmpiricalMaximinScore: result.BestFitness,
-				EmpiricalMaximinSeq:   result.BestSeq,
-				Baseline:              baseline,
-				SimilarityRatio:       similarity,
-				Generations:           *generations,
-			})
+			jobs = append(jobs, pairJob{i, j})
 		}
+	}
+
+	rows := make([]resultRow, len(jobs))
+	var finalPopRows []finalPopRow // only accumulated if dumpMatrixPath is set
+	var finalPopMu sync.Mutex
+	var printMu sync.Mutex
+
+	err = parallelFor(len(jobs), *threads, func(idx int) error {
+		job := jobs[idx]
+		a, b := models[job.i], models[job.j]
+
+		printMu.Lock()
+		fmt.Fprintf(os.Stderr, "minmaxcmcompare: refining %s vs %s ...\n", a.Name, b.Name)
+		printMu.Unlock()
+
+		pairSeed := *seed + int64(job.i)*7_919 + int64(job.j)*104_729
+		result, err := refineMaximin(ctx, emitter, scorer, a, b,
+			seedPools[a.Name], seedPools[b.Name],
+			refineConfig{
+				PopSize:           *popSize,
+				Generations:       *generations,
+				SurvivalFrac:      *survivalFrac,
+				MutationsPerChild: *mutationsPerChild,
+				CrossoverProb:     *crossoverProb,
+				Seed:              pairSeed,
+			})
+		if err != nil {
+			return fmt.Errorf("refining pair (%s, %s): %w", a.Name, b.Name, err)
+		}
+
+		baseline := (selfScores[a.Name] + selfScores[b.Name]) / 2.0
+		similarity := 0.0
+		if baseline != 0 {
+			similarity = result.BestFitness / baseline
+		}
+
+		rows[idx] = resultRow{
+			ModelA: a.Name, ModelB: b.Name,
+			EmpiricalMaximinScore: result.BestFitness,
+			EmpiricalMaximinSeq:   result.BestSeq,
+			Baseline:              baseline,
+			SimilarityRatio:       similarity,
+			Generations:           *generations,
+		}
+
+		if *dumpMatrixPath != "" {
+			pairRows := make([]finalPopRow, len(result.FinalPopulation))
+			for k, c := range result.FinalPopulation {
+				pairRows[k] = finalPopRow{
+					ModelA: a.Name, ModelB: b.Name,
+					CandidateID: c.ID, Seq: c.Seq,
+					ScoreA: c.ScoreA, ScoreB: c.ScoreB,
+				}
+			}
+			finalPopMu.Lock()
+			finalPopRows = append(finalPopRows, pairRows...)
+			finalPopMu.Unlock()
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
 	sort.Slice(rows, func(i, j int) bool { return rows[i].SimilarityRatio > rows[j].SimilarityRatio })
@@ -227,7 +266,16 @@ func runMinmaxcmcompare() error {
 		defer f.Close()
 		out = f
 	}
-	return writeResultsTSV(out, rows)
+	if err := writeResultsTSV(out, rows); err != nil {
+		return err
+	}
+
+	if *dumpMatrixPath != "" {
+		if err := writeFinalPopTSV(*dumpMatrixPath, finalPopRows); err != nil {
+			return fmt.Errorf("writing -dump-matrix output: %w", err)
+		}
+	}
+	return nil
 }
 
 // --- seeding ---------------------------------------------------------
@@ -283,6 +331,19 @@ type refineConfig struct {
 type refineResult struct {
 	BestFitness float64
 	BestSeq     string
+
+	// FinalPopulation is every candidate's scoreA/scoreB from the last
+	// completed generation (survivors carried over plus that
+	// generation's newly-scored children) -- captured for -dump-matrix,
+	// not used in computing BestFitness/BestSeq themselves.
+	FinalPopulation []finalCandidate
+}
+
+type finalCandidate struct {
+	ID     string
+	Seq    string
+	ScoreA float64
+	ScoreB float64
 }
 
 // refineMaximin runs the evolutionary search described in the package
@@ -328,13 +389,32 @@ func refineMaximin(ctx context.Context, emitter infernal.Emitter, scorer inferna
 		for i, c := range candidates {
 			seqs[i] = seqpool.NewSequence(c.id, "candidate", c.seq)
 		}
-		scoresA, err := scorer.Score(ctx, a.Path, seqs)
-		if err != nil {
-			return fmt.Errorf("scoring candidates against %s: %w", a.Name, err)
+
+		// Score against A and B concurrently -- these are independent
+		// cmsearch calls over the same candidate set, so there's no
+		// reason to serialize them. Combined with the pair-level
+		// parallelism in runMinmaxcmcompare (-threads), this means up to
+		// ~2x -threads cmsearch processes can be in flight at once; see
+		// the -threads flag's help text.
+		var scoresA, scoresB map[string]float64
+		var errA, errB error
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			scoresA, errA = scorer.Score(ctx, a.Path, seqs)
+		}()
+		go func() {
+			defer wg.Done()
+			scoresB, errB = scorer.Score(ctx, b.Path, seqs)
+		}()
+		wg.Wait()
+
+		if errA != nil {
+			return fmt.Errorf("scoring candidates against %s: %w", a.Name, errA)
 		}
-		scoresB, err := scorer.Score(ctx, b.Path, seqs)
-		if err != nil {
-			return fmt.Errorf("scoring candidates against %s: %w", b.Name, err)
+		if errB != nil {
+			return fmt.Errorf("scoring candidates against %s: %w", b.Name, errB)
 		}
 		for i := range candidates {
 			candidates[i].scoreA = scoresA[candidates[i].id]
@@ -392,7 +472,12 @@ func refineMaximin(ctx context.Context, emitter infernal.Emitter, scorer inferna
 		updateBest()
 	}
 
-	return refineResult{BestFitness: fitness(best), BestSeq: best.seq}, nil
+	finalPop := make([]finalCandidate, len(population))
+	for i, c := range population {
+		finalPop[i] = finalCandidate{ID: c.id, Seq: c.seq, ScoreA: c.scoreA, ScoreB: c.scoreB}
+	}
+
+	return refineResult{BestFitness: fitness(best), BestSeq: best.seq, FinalPopulation: finalPop}, nil
 }
 
 var alphabet = []byte("ACGT")
@@ -446,6 +531,74 @@ func writeResultsTSV(w *os.File, rows []resultRow) error {
 	for _, r := range rows {
 		if _, err := fmt.Fprintf(w, "%s\t%s\t%.6f\t%.6f\t%s\t%.6f\t%d\n",
 			r.ModelA, r.ModelB, r.SimilarityRatio, r.EmpiricalMaximinScore, r.EmpiricalMaximinSeq, r.Baseline, r.Generations); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// finalPopRow is one candidate from one pair's FINAL generation --
+// see -dump-matrix. Long format (one row per candidate) rather than a
+// wide per-pair matrix, since populations differ in size pair to pair
+// and long format loads directly into pandas/R without ragged columns.
+type finalPopRow struct {
+	ModelA, ModelB string
+	CandidateID    string
+	Seq            string
+	ScoreA, ScoreB float64
+}
+
+func writeFinalPopTSV(path string, rows []finalPopRow) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	if _, err := fmt.Fprintln(f, "model_a\tmodel_b\tcandidate_id\tseq\tscore_a\tscore_b"); err != nil {
+		return err
+	}
+	for _, r := range rows {
+		if _, err := fmt.Fprintf(f, "%s\t%s\t%s\t%s\t%.6f\t%.6f\n",
+			r.ModelA, r.ModelB, r.CandidateID, r.Seq, r.ScoreA, r.ScoreB); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// parallelFor runs worker(i) for i in [0, n) using up to `threads`
+// concurrent goroutines bounded by a semaphore, returning the first
+// error encountered (in index order, for deterministic reporting) after
+// all launched workers finish. Identical in approach to
+// pipeline.parallelFor -- duplicated rather than imported, consistent
+// with this file's existing philosophy of small boilerplate duplication
+// across the two standalone programs (see the cmFlag/cmFileFlag comment
+// above) rather than adding cross-file indirection for a few lines.
+func parallelFor(n, threads int, worker func(i int) error) error {
+	if threads > n {
+		threads = n
+	}
+	if threads < 1 {
+		threads = 1
+	}
+	sem := make(chan struct{}, threads)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			errs[i] = worker(i)
+		}(i)
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		if err != nil {
 			return err
 		}
 	}

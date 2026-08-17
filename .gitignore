@@ -1,2 +1,7 @@
 *.cm.*
 *.cm
+*._*~
+*.log
+/results/*
+*._DStore
+/bin
