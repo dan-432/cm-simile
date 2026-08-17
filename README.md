@@ -115,8 +115,6 @@ for generation in 1..generations:
 
 Independent sampling struggles to find the true maximin sequence because it's often a compromise point that's somewhat atypical of *both* models individually -- a low-probability region under either model's own emission distribution. Turning it into a directed search (using `cmsearch`'s bit score as a fitness oracle) converges toward that region much faster than blind sampling, at the cost of two `cmsearch` calls per generation per pair (still batched across the whole population, just not batched across pairs the way `bitscoresumdifference` is).
 
-The actual ceiling here is CMCompare's exact analytic solution (dynamic programming over the product of the two CMs' state graphs) -- this tool is a fast, good-enough approximation for triage, not a replacement for it.
-
 **Parallelism.** Pairs run concurrently, bounded by `-threads` (default 4). Within a single pair's refinement, each generation's scoring against model A and model B also runs concurrently -- so up to roughly `2 x threads` `cmsearch` processes can be in flight at once; reduce `-threads` if that's too much for your allocation.
 
 **Matrix output.** `-dump-matrix PATH` writes every candidate's scoreA/scoreB from each reported pair's *final* generation (long format: `model_a, model_b, candidate_id, seq, score_a, score_b`) -- the converged population the search actually found, not the full generation-by-generation trajectory.
@@ -128,8 +126,6 @@ The core validation question: **does either tool's similarity statistic recover 
 Planned evaluation:
 - **Within-clan vs. between-clan scoring.** Compute pairwise statistics for all CM pairs within each Rfam clan (from `data/Rfam.clanin`), compare against a background distribution of between-clan pairs. Within-clan pairs should show systematically lower p-values / higher similarity ratios.
 - **Discrimination performance.** Using clan co-membership as the binary ground-truth label, summarise separability with ROC/precision-recall curves and AUC.
-- **Failure case inspection.** Clans that fail to separate cleanly are informative either way -- phylogenetic/functional relatedness without detectable CM-level signal, or a real limitation of the sampling/shuffling approach.
-- **Cross-check between the two tools, and against real CMCompare**, on a manageable subset of clans, to confirm the distributional and worst-case statistics broadly agree in ranking even when their absolute scales differ.
 
 ## data/
 
@@ -161,7 +157,6 @@ This tool depends on and is intended to be used alongside:
 
 - Nawrocki, E.P. and Eddy, S.R. (2013) *Infernal 1.1: 100-fold faster RNA homology searches*, Bioinformatics 29:2933-2935.
 - Kalvari, I. et al. *Rfam*, Nucleic Acids Research. (Cite the release notes/publication matching the Rfam v15.1 data version in `data/` -- check rfam.org for the specific v15.1 citation.)
-- Höner zu Siederdissen, C. and Hofacker, I.L. (2010) *Discriminatory power of RNA family models*, Bioinformatics 26:i453-i459. (CMCompare, prior art for exact MaxiMin comparison.)
 
 ## tests/
 
