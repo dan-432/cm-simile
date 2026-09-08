@@ -8,6 +8,7 @@ package matrix
 import (
 	"sort"
 	"fmt"
+	"math"
 )
 
 // ScoreMatrix holds bit scores for a pool of sequences scored against a
@@ -38,6 +39,17 @@ func (m *ScoreMatrix) Set(seqID, model string, score float64) {
 func (m *ScoreMatrix) SetAll(model string, scores map[string]float64) {
 	for seqID, sc := range scores {
 		m.Set(seqID, model, sc)
+	}
+}
+
+// Merge merges the scores from other into m, overwriting any existing
+// scores for the same (seqID, model) pairs. Used to combine multiple
+// ScoreMatrix instances into one.
+func (m *ScoreMatrix) Merge(other *ScoreMatrix) {
+	for seqID, row := range other.scores {
+		for model, sc := range row {
+			m.Set(seqID, model, sc)
+		}
 	}
 }
 
@@ -125,3 +137,46 @@ func (m *ScoreMatrix) MedianFor(seqIDs []string, model string) (float64, error) 
 	return (scores[n/2-1] + scores[n/2]) / 2, nil
 }
 
+// GetTopScorers returns the IDs of the sequences that scored in the top
+// proportion (0.0-1.0) against model. Returns an error if any sequence lacks
+// a score against model (a scoring gap should surface loudly, not silently
+// skew the top scorers over fewer sequences than intended).
+func (m *ScoreMatrix) GetTopScorers(proportion float64, model string, seqIDs []string) ([]string, error) {
+	if len(seqIDs) == 0 {
+		return nil, fmt.Errorf("matrix: GetTopScorers called with no sequence IDs")
+	}
+	if proportion < 0 || proportion > 1 {
+		return nil, fmt.Errorf("matrix: GetTopScorers called with invalid proportion %f", proportion)
+	}
+
+	var scores []struct {
+		id    string
+		score float64
+	}
+	for _, id := range seqIDs {
+		sc, err := m.MustGet(id, model)
+		if err != nil {
+			return nil, err
+		}
+		scores = append(scores, struct {
+			id    string
+			score float64
+		}{id, sc})
+	}
+
+	sort.Slice(scores, func(i, j int) bool {
+		return scores[i].score > scores[j].score
+	})
+
+	n := int(math.Ceil(float64(len(scores)) * proportion,))
+
+	if n > len(scores) {
+		n = len(scores)
+	}
+	
+	topScorers := make([]string, n)
+	for i := 0; i < n; i++ {
+		topScorers[i] = scores[i].id
+	}
+	return topScorers, nil
+}

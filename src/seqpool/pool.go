@@ -64,6 +64,13 @@ func (p *Pool) Add(seqs ...Sequence) {
 	p.index = nil
 }
 
+// AddFromPool appends all sequences from other to p and revalidates the ID index.
+func (p *Pool) AddFromPool(other *Pool) {
+	p.Sequences = append(p.Sequences, other.Sequences...)
+	p.index = nil
+	p.ensureIndex()
+}
+
 // ByOrigin returns all sequences in the pool tagged with the given origin
 // model name, in the order they were added.
 func (p *Pool) ByOrigin(origin string) []Sequence {

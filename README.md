@@ -6,6 +6,7 @@ Two standalone Go programs, both living in `src/`, sharing the same package infr
 
 - **`bitscoresumdifference`** -- the primary, fast screening tool. Samples real sequences from each model, cross-scores them, and tests the observed directional median bit-score difference against a dinucleotide-shuffled null distribution for a bootstrap p-value per pair. Batches cleanly across many models (O(N) subprocess calls, not O(N²)) -- this is the tool for screening large CM sets, e.g. novel motifs against all of Rfam.
 - **`minmaxcmcompare`** -- the worst-case counterpart. Approximates CMCompare's exact MaxiMin score (the single sequence that scores as well as possible against *both* models at once) via an evolutionary search: seed a population from real `cmemit` samples, then mutate/crossover/select using `cmsearch` bit scores as the fitness function. Answers "does a single dangerous sequence exist that would confuse both models", which the distributional statistic can't. Costs meaningfully more per pair and doesn't batch the way the bootstrap tool does -- best used to confirm a handful of pairs `bitscoresumdifference` already flagged as significant, not to screen from scratch.
+- **`ksmwcompare`** -- a simpler distributional alternative to `bitscoresumdifference`'s adaptive reservoir: one real pool and one dinucleotide-shuffled null pool per model (no growth loop, no convergence diagnostic), compared directly via two-sample Kolmogorov-Smirnov (any distributional difference, including shape -- e.g. a real pool that's a mixture of strong- and weak-signal sequences) and Mann-Whitney U (location shift, matching `bitscoresumdifference`'s own hypothesis). Trades some run-to-run stability in the exact reported numbers for a much smaller, easier-to-reason-about system; `-n-null-pools` lets you pool a few independent shuffle instantiations together as cheap insurance against an unlucky single draw.
 
 ## Build
 
@@ -13,13 +14,14 @@ Two standalone Go programs, both living in `src/`, sharing the same package infr
 mkdir -p bin
 go build -o bin/bitscoresumdifference src/bitscoresumdifference.go
 go build -o bin/minmaxcmcompare src/minmaxcmcompare.go
+go build -o bin/ksmwcompare src/ksmwcompare.go
 ```
 
 Note both files are `package main` with their own `func main`, living in the same `src/` directory as the shared packages (`src/infernal`, `src/pipeline`, etc.). This means `go build ./...` / `go vet ./...` will fail specifically on `src` itself ("main redeclared") -- that's expected, not a bug: build and vet each program by naming its file explicitly, as above. The shared packages underneath are ordinary Go packages and build/vet/test normally:
 
 ```
-go vet ./src/infernal/... ./src/matrix/... ./src/output/... ./src/pipeline/... ./src/seqpool/... ./src/shuffle/... ./src/stats/...
-go test ./src/infernal/... ./src/matrix/... ./src/output/... ./src/pipeline/... ./src/seqpool/... ./src/shuffle/... ./src/stats/...
+go vet ./src/infernal/... ./src/matrix/... ./src/output/... ./src/pipeline/... ./src/seqpool/... ./src/shuffle/... ./src/stats/... ./src/combine/...
+go test ./src/infernal/... ./src/matrix/... ./src/output/... ./src/pipeline/... ./src/seqpool/... ./src/shuffle/... ./src/stats/... ./src/combine/...
 ```
 
 Zero external Go dependencies (stdlib only), so this builds as a static binary anywhere Go is available.
@@ -146,7 +148,8 @@ Output TSVs from both tools land here by convention (`-out results/...`); not ve
 
 ## src/
 
-- `bitscoresumdifference.go`, `minmaxcmcompare.go` -- the two standalone CLI programs (see above).
+- `bitscoresumdifference.go`, `minmaxcmcompare.go`, `ksmwcompare.go` -- the three standalone CLI programs (see above).
+- `nptest/` -- two-sample Kolmogorov-Smirnov and Mann-Whitney U test implementations, used by `ksmwcompare.go`.
 - `infernal/` -- `cmemit`/`cmsearch` subprocess wrappers, `--tblout` parsing, and multi-model CM file expansion (`cmstat`/`cmfetch`, for pointing either tool directly at `data/Rfam.cm`).
 - `seqpool/` -- the tagged-sequence pool abstraction shared by both tools.
 - `matrix/`, `stats/`, `pipeline/` -- the (sequence x model) score matrix, pairwise statistics, and N-way orchestration used by `bitscoresumdifference`.
@@ -172,3 +175,9 @@ go build -o bin/bitscoresumdifference src/bitscoresumdifference.go
 ```
 
 `tests/cms/` holds placeholder `.cm` files for the above (not real covariance models -- just fixtures the fake binaries key off of by filename).
+
+
+## Future Direction
+
+Implement with Hidden Markov Models (HMMs) with hmmer equivalents to cm - `hmmemit`, `hmmsearch`, `hmmstat`, `hmmfetch`.
+Shouldn't be too much work to implement with existing go module dynamically taking executable paths and the command line arguments being almost identical for HMM and CM tools but would need to be tested and validated.

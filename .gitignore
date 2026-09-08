@@ -1,6 +1,7 @@
 *.cm.*
 *.cm
 *._*~
+._*
 *.log
 /results/*
 *._DStore

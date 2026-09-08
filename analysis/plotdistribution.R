@@ -8,18 +8,17 @@
 
 library(readr)
 library(ggplot2)
+source(file.path("analysis", "publication_plot_helpers.R"))
 
 # --- config ------------------------------------------------------------
 input_path  <- "results/checkingbitsumdist/real_matrix.tsv"             # bitscoresumdifference output
-
 null_path <- "results/checkingbitsumdist/reservoir_matrix.tsv"             # bitscoresumdifference output
-
 
 modelA <- "SNORA17"
 modelB <- "Pyrobac-1"
 
-
-output_path <- sprintf("%s_%s_distribution.png", modelA, modelB)
+output_path <- sprintf("%s_%s_distribution.svg", modelA, modelB)
+stats_output_path <- sprintf("%s_%s_distribution_stats.txt", modelA, modelB)
 
 # Manu "Kea" palette (github.com/G-Thomson/Manu)
 kea_palette <- c("#6C803A", "#7B5C34", "#AB7C47", "#CCAE42",
@@ -49,10 +48,6 @@ p <- ggplot() +
   geom_density(aes(x = a_scored_on_model_b, color = "a_scored_on_model_b"), linewidth = 1) +
   geom_density(aes(x = a_null_scores, color = "a_null_scores"), linewidth = 1) +
   geom_density(aes(x = b_null_scores, color = "b_null_scores"), linewidth = 1) +
-  geom_vline(aes(xintercept = median(self_scores_a), color = "self_scores_a"), linetype = "dashed") +
-  geom_vline(aes(xintercept = median(self_scores_b), color = "self_scores_b"), linetype = "dashed") +
-  geom_vline(aes(xintercept = median(b_scored_on_model_a), color = "b_scored_on_model_a"), linetype = "dashed") +
-  geom_vline(aes(xintercept = median(a_scored_on_model_b), color = "a_scored_on_model_b"), linetype = "dashed") +
   scale_color_manual(values = c(
     self_scores_a = kea_palette[1],
     self_scores_b = kea_palette[3],
@@ -64,13 +59,12 @@ p <- ggplot() +
   labs(
     x = "Bit Score",
     y = "Density",
-    title = sprintf("Bit score distributions for %s and %s", modelA, modelB),
     color = "Score Type"
   ) +
-  theme_minimal(base_size = 13)
+  theme_publication(base_size = 12, legend_position = "right")
 
 # Save the plot
-ggsave(output_path, p, width = 8, height = 6, dpi = 300)
+ggsave(output_path, p, width = 8.5, height = 5.5, dpi = 300, bg = "white")
 
 
 # do a KS test between cross scores and null scores
@@ -87,7 +81,34 @@ ks_test_a_on_b_self <- ks.test(a_scored_on_model_b, self_scores_b)
 
 # Print the KS test results for cross vs self scores
 cat(sprintf("KS test for %s scored on %s vs self: D = %.4f, p-value = %.4g\n", modelB, modelA, ks_test_b_on_a_self$statistic, ks_test_b_on_a_self$p.value))
-cat(sprintf("KS test for %s scored on %s vs self: D = %.4f, p-value = %.4g\n", modelA, modelB, ks_test_a_on_b_self$statistic, ks_test_a_on_b_self$p.value)) 
+cat(sprintf("KS test for %s scored on %s vs self: D = %.4f, p-value = %.4g\n", modelA, modelB, ks_test_a_on_b_self$statistic, ks_test_a_on_b_self$p.value))
+
+stats_summary <- list(
+  model_a = modelA,
+  model_b = modelB,
+  ks_b_on_a_vs_null_d = ks_test_b_on_a$statistic,
+  ks_b_on_a_vs_null_p = ks_test_b_on_a$p.value,
+  ks_a_on_b_vs_null_d = ks_test_a_on_b$statistic,
+  ks_a_on_b_vs_null_p = ks_test_a_on_b$p.value,
+  ks_b_on_a_vs_self_d = ks_test_b_on_a_self$statistic,
+  ks_b_on_a_vs_self_p = ks_test_b_on_a_self$p.value,
+  ks_a_on_b_vs_self_d = ks_test_a_on_b_self$statistic,
+  ks_a_on_b_vs_self_p = ks_test_a_on_b_self$p.value
+)
+
+lines <- c(
+  sprintf("model_a=%s", stats_summary$model_a),
+  sprintf("model_b=%s", stats_summary$model_b),
+  sprintf("ks_b_on_a_vs_null_d=%.6g", stats_summary$ks_b_on_a_vs_null_d),
+  sprintf("ks_b_on_a_vs_null_p=%.6g", stats_summary$ks_b_on_a_vs_null_p),
+  sprintf("ks_a_on_b_vs_null_d=%.6g", stats_summary$ks_a_on_b_vs_null_d),
+  sprintf("ks_a_on_b_vs_null_p=%.6g", stats_summary$ks_a_on_b_vs_null_p),
+  sprintf("ks_b_on_a_vs_self_d=%.6g", stats_summary$ks_b_on_a_vs_self_d),
+  sprintf("ks_b_on_a_vs_self_p=%.6g", stats_summary$ks_b_on_a_vs_self_p),
+  sprintf("ks_a_on_b_vs_self_d=%.6g", stats_summary$ks_a_on_b_vs_self_d),
+  sprintf("ks_a_on_b_vs_self_p=%.6g", stats_summary$ks_a_on_b_vs_self_p)
+)
+writeLines(lines, con = stats_output_path)
 
 # plot culmulative distribution functions (CDFs) for null, cross scores and self scores
 cdf_self_plot <- ggplot() +
@@ -108,11 +129,10 @@ cdf_self_plot <- ggplot() +
   labs(
     x = "Bit Score",
     y = "Cumulative Distribution Function (CDF)",
-    title = sprintf("CDFs for %s and %s (cross vs self vs null)", modelA, modelB),
     color = "Score Type"
   ) +
-  theme_minimal(base_size = 13)
+  theme_publication(base_size = 12, legend_position = "right")
 
 # Save the CDF plot for cross vs self scores
-cdf_self_output_path <- sprintf("%s_%s_cdf_cross_vs_self.png", modelA, modelB)
-ggsave(cdf_self_output_path, cdf_self_plot, width = 8, height = 6, dpi = 300)
+cdf_self_output_path <- sprintf("%s_%s_cdf_cross_vs_self.svg", modelA, modelB)
+ggsave(cdf_self_output_path, cdf_self_plot, width = 8.5, height = 5.5, dpi = 300, bg = "white")

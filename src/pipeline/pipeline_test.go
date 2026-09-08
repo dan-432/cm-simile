@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"math/rand"
 	"testing"
+	"os"
+	"path/filepath"
 
 	"cmsimile/src/seqpool"
+	"cmsimile/src/matrix"
 )
 
 // fakeEmitter generates synthetic sequences per model without needing
@@ -298,5 +301,100 @@ func TestPipeline_ReservoirConverges(t *testing.T) {
 
 	if len(res.Warnings) > 0 {
 		t.Logf("warnings: %v", res.Warnings)
+	}
+}
+
+func TestEstimateCounts(t *testing.T) {
+	cfg := Config{
+		Models: []Model{{Name: "A"}, {Name: "B"}, {Name: "C"}},
+		Query:  map[string]bool{"A": true},
+		Reservoir: ReservoirConfig{
+			ReservoirMin:       10,
+			ReservoirMax:       40,
+			ReservoirTolerance: 0.1,
+			DiagnosticResamples: 10,
+		},
+	}
+	est := Estimate(cfg)
+	if est.NModels != 3 {
+		t.Fatalf("NModels=%d, want 3", est.NModels)
+	}
+	if est.NPairsTotal != 3 {
+		t.Fatalf("NPairsTotal=%d, want 3", est.NPairsTotal)
+	}
+	if est.NPairsReported != 2 {
+		t.Fatalf("NPairsReported=%d, want 2", est.NPairsReported)
+	}
+	if est.CmsearchCallsReal != 3 {
+		t.Fatalf("CmsearchCallsReal=%d, want 3", est.CmsearchCallsReal)
+	}
+}
+
+func TestRunDetailedReturnsArtifacts(t *testing.T) {
+	basePattern := map[string]string{
+		"modelA": "ACGTACGTGG",
+		"modelB": "ACGTACGTGG",
+		"modelC": "TTTTCCCCAA",
+	}
+
+	cfg := Config{
+		Models: []Model{
+			{Name: "modelA", Path: "modelA"},
+			{Name: "modelB", Path: "modelB"},
+			{Name: "modelC", Path: "modelC"},
+		},
+		NPool:     20,
+		NShuffles: 20,
+		Reservoir: testReservoir(20),
+		Seed:      7,
+		Threads:   2,
+		Emitter:   fakeEmitter{basePattern: basePattern},
+		Scorer:    fakeScorer{basePattern: basePattern},
+	}
+
+	detailed, err := RunDetailed(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("RunDetailed error: %v", err)
+	}
+	if detailed.RealPool == nil || detailed.RealMatrix == nil {
+		t.Fatalf("RunDetailed did not return real artifacts")
+	}
+	if len(detailed.Results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(detailed.Results))
+	}
+
+	results, warnings, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if len(results) != len(detailed.Results) {
+		t.Fatalf("Run results len=%d, RunDetailed len=%d", len(results), len(detailed.Results))
+	}
+	if len(warnings) != len(detailed.Warnings) {
+		t.Fatalf("Run warnings len=%d, RunDetailed warnings len=%d", len(warnings), len(detailed.Warnings))
+	}
+}
+
+func TestDumpMatricesWritesFiles(t *testing.T) {
+	dir := t.TempDir()
+	realPool := &seqpool.Pool{}
+	realPool.Add(seqpool.NewSequence("r1", "A", "ACGT"))
+	resPool := &seqpool.Pool{}
+	resPool.Add(seqpool.NewSequence("n1", "A", "TGCA"))
+
+	realM := matrix.New()
+	realM.Set("r1", "A", 1.23)
+	resM := matrix.New()
+	resM.Set("n1", "A", 0.45)
+
+	if err := DumpMatrices(dir, realPool, realM, resPool, resM); err != nil {
+		t.Fatalf("DumpMatrices error: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "real_matrix.tsv")); err != nil {
+		t.Fatalf("real_matrix.tsv missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "reservoir_matrix.tsv")); err != nil {
+		t.Fatalf("reservoir_matrix.tsv missing: %v", err)
 	}
 }

@@ -27,7 +27,7 @@ library(ggplot2)
 # --- config ------------------------------------------------------------
 input_path      <- "results/bitscoresum_benchmark_5687123/raw_results.tsv"  # bitscoresumdifference output
 input_clan_path <- "results/clan_population_5687123/population_clans.tsv"
-output_path     <- "bitscoresumdifference_boxplot.png"
+output_path     <- "bitscoresumdifference_boxplot.svg"
 
 # Combined symmetric statistic: stat_a_into_b + stat_b_into_a. Column
 # NAMES are unchanged from the original mean-based design (still

@@ -1,0 +1,10 @@
+model_a=SNORA17
+model_b=SNORA43
+resample_size=100
+n_boot=200
+direction=SNORA17 into SNORA43
+observed=3.95
+p_value=0.00497512
+direction=SNORA43 into SNORA17
+observed=7
+p_value=0.00497512

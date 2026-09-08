@@ -138,7 +138,7 @@ func (s Scorer) Score(ctx context.Context, cmPath string, seqs []seqpool.Sequenc
 		"--tblout", tblPath,
 	}
 	if s.DisableFilters {
-		args = append(args, "--max")
+		args = append(args, "--max", "--smxsize", "1024")
 	}
 	args = append(args, cmPath, fastaPath)
 

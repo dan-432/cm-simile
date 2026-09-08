@@ -131,6 +131,18 @@ type WorkEstimate struct {
 	CmsearchCallsTotalWorst int
 }
 
+// RunDetailedResult exposes intermediate artifacts used to compute
+// pairwise statistics. This lets higher-level orchestration (e.g.
+// iterative model-combine loops) reuse already-computed real-pool scores
+// rather than re-emitting/re-scoring child pools just to select top
+// sequences for a merge step.
+type RunDetailedResult struct {
+	Results    []stats.PairStat
+	Warnings   []string
+	RealPool   *seqpool.Pool
+	RealMatrix *matrix.ScoreMatrix
+}
+
 // Estimate computes a WorkEstimate for cfg without running anything.
 func Estimate(cfg Config) WorkEstimate {
 	n := len(cfg.Models)
@@ -178,34 +190,46 @@ func Estimate(cfg Config) WorkEstimate {
 // reservoirResult.Warnings) that are worth a human looking at even
 // though they didn't stop the run.
 func Run(ctx context.Context, cfg Config) ([]stats.PairStat, []string, error) {
-	if err := validate(cfg); err != nil {
+	detailed, err := RunDetailed(ctx, cfg)
+	if err != nil {
 		return nil, nil, err
+	}
+	return detailed.Results, detailed.Warnings, nil
+}
+
+// RunDetailed executes the same work as Run but also returns the real
+// pool and its score matrix for callers that need to perform additional
+// post-statistics logic (for example, selecting top-scoring child
+// sequences to combine models).
+func RunDetailed(ctx context.Context, cfg Config) (RunDetailedResult, error) {
+	if err := validate(cfg); err != nil {
+		return RunDetailedResult{}, err
 	}
 
 	realPool, err := buildRealPool(ctx, cfg)
 	if err != nil {
-		return nil, nil, fmt.Errorf("pipeline: building real pool: %w", err)
+		return RunDetailedResult{}, fmt.Errorf("pipeline: building real pool: %w", err)
 	}
 
 	realMatrix, err := scorePoolAgainstAllModels(ctx, cfg, realPool, newTicker(cfg.OnProgress, "scoring_real", len(cfg.Models)))
 	if err != nil {
-		return nil, nil, fmt.Errorf("pipeline: scoring real pool: %w", err)
+		return RunDetailedResult{}, fmt.Errorf("pipeline: scoring real pool: %w", err)
 	}
 
 	reservoir, err := buildReservoir(ctx, cfg, realPool, cfg.Reservoir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("pipeline: building null reservoir: %w", err)
+		return RunDetailedResult{}, fmt.Errorf("pipeline: building null reservoir: %w", err)
 	}
 
 	if cfg.DumpMatricesDir != "" {
 		if err := DumpMatrices(cfg.DumpMatricesDir, realPool, realMatrix, reservoir.Pool, reservoir.Matrix); err != nil {
-			return nil, nil, fmt.Errorf("pipeline: dumping matrices: %w", err)
+			return RunDetailedResult{}, fmt.Errorf("pipeline: dumping matrices: %w", err)
 		}
 	}
 
 	results, err := computeAllPairStats(cfg, realPool, realMatrix, reservoir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("pipeline: computing pairwise statistics: %w", err)
+		return RunDetailedResult{}, fmt.Errorf("pipeline: computing pairwise statistics: %w", err)
 	}
 
 	sort.Slice(results, func(i, j int) bool {
@@ -219,7 +243,12 @@ func Run(ctx context.Context, cfg Config) ([]stats.PairStat, []string, error) {
 		}
 		return results[i].ModelB < results[j].ModelB
 	})
-	return results, reservoir.Warnings, nil
+	return RunDetailedResult{
+		Results:    results,
+		Warnings:   reservoir.Warnings,
+		RealPool:   realPool,
+		RealMatrix: realMatrix,
+	}, nil
 }
 
 func validate(cfg Config) error {

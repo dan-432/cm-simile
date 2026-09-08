@@ -7,56 +7,44 @@
 #   conda install -c conda-forge r-base r-readr r-ggplot2
 
 library(readr)
-library(ggplot2)
+source(file.path("analysis", "publication_plot_helpers.R"))
 
 # --- config ------------------------------------------------------------
-input_path  <- "results/minmax_benchmark_5664258/raw_results.tsv"             # bitscoresumdifference/clan-benchmark output
-input_clan_path  <- "results/clan_population_5664258/population_clans.tsv"
-output_path <- "minmax_boxplot.png"
-
-# Manu "Kea" palette (github.com/G-Thomson/Manu)
-kea_palette <- c("#6C803A", "#7B5C34", "#AB7C47", "#CCAE42",
-                  "#D73202", "#272318", "#D3CDBF")
+input_path  <- "results/ksmwcompare_benchmark_5740367/raw_results.tsv"
+input_clan_path  <- "results/clan_population_5740367/population_clans.tsv"
+output_path <- file.path("analysis", "ksmwcompare_boxplot.svg")
+stats_output_path <- file.path("analysis", "ksmwcompare_boxplot_stats.txt")
 
 # --- load & label --------------------------------------------------------
 df <- read_tsv(input_path, show_col_types = FALSE)
 clans <- read_tsv(input_clan_path, show_col_types = FALSE)
 
-# Build a lookup of accession -> clan, then annotate each pair.
-clan_map <- setNames(clans$clan, clans$accession)
-df$clan_a <- clan_map[df$model_a]
-df$clan_b <- clan_map[df$model_b]
+df$stat <- df$ks_d_a_into_b + df$ks_d_b_into_a
 
-df$comparison <- ifelse(
-  !is.na(df$clan_a) & !is.na(df$clan_b) & df$clan_a != "" & df$clan_a == df$clan_b,
-  "within_clan",
-  "everything_else"
-)
-
-df$comparison <- factor(df$comparison, levels = c("within_clan", "everything_else"))
-
-# quick Wilcoxon (Mann-Whitney) test
-wt <- wilcox.test(similarity_ratio ~ comparison, data = df)
-n_labels <- table(df$comparison)
-subtitle_txt <- sprintf(
-  "within_clan n=%d, everything_else n=%d  |  Wilcoxon p = %.3g",
-  n_labels["within_clan"], n_labels["everything_else"], wt$p.value
+df <- prepare_clan_comparison(
+  df,
+  stat_col = "stat",
+  clans = clans,
+  accession_col = "accession",
+  clan_col = "clan",
+  model_a_col = "model_a",
+  model_b_col = "model_b"
 )
 
 # --- plot ------------------------------------------------------------
-p <- ggplot(df, aes(x = comparison, y = similarity_ratio, fill = comparison)) +
-  geom_boxplot(outlier.shape = 21, outlier.alpha = 0.6, width = 0.5) +
-  scale_fill_manual(values = c(within_clan = kea_palette[1],
-                                everything_else = kea_palette[2])) +
-  labs(
-    x = NULL,
-    y = "Similarity Ratio",
-    title = "Cross-recognition statistic: within-clan vs. everything else",
-    subtitle = subtitle_txt,
-    fill = NULL
-  ) +
-  theme_minimal(base_size = 13) +
-  theme(legend.position = "none")
+result <- plot_clan_boxplot(
+  df,
+  stat_col = "stat",
+  y_label = "KS D(a into b) + KS D(b into a)",
+  title = NULL,
+  save_path = output_path,
+  stats_output_path = stats_output_path,
+  width = 5.5,
+  height = 4.5,
+  box_width = 0.45,
+  y_limits = c(0, 2),
+  dpi = 300
+)
 
-print(p)
-ggsave(output_path, p, width = 6, height = 5, dpi = 300)
+print(result$plot)
+print(result$summary$summary_text)

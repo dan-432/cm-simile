@@ -22,7 +22,7 @@ jobs:
         go-version: '1.22.2'
 
     - name: Build
-      run: mkdir -p bin && go build -v -o bin/bitscoresumdifference src/bitscoresumdifference.go && go build -v -o bin/minmaxcmcompare src/minmaxcmcompare.go
+      run: mkdir -p bin && go build -v -o bin/bitscoresumdifference src/bitscoresumdifference.go && go build -v -o bin/minmaxcmcompare src/minmaxcmcompare.go && go build -v -o bin/ksmwcompare src/ksmwcompare.go
 
     - name: Test
       run: go vet ./src/infernal/... ./src/matrix/... ./src/output/... ./src/pipeline/... ./src/seqpool/... ./src/shuffle/... ./src/stats/... && go test ./src/infernal/... ./src/matrix/... ./src/output/... ./src/pipeline/... ./src/seqpool/... ./src/shuffle/... ./src/stats/...

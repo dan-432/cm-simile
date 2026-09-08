@@ -23,6 +23,7 @@
 library(readr)
 library(dplyr)
 library(ggplot2)
+source(file.path("analysis", "publication_plot_helpers.R"))
 
 # --- config ------------------------------------------------------------
 real_matrix_path      <- "results/checkingbitsumdist/real_matrix.tsv" 
@@ -38,7 +39,8 @@ resample_size <- 100
 n_boot        <- 200
 seed          <- 42
 
-output_path <- "null_vs_observed.png"
+output_path <- "null_vs_observed.svg"
+stats_output_path <- "null_vs_observed_stats.txt"
 
 # Manu "Kea" palette (github.com/G-Thomson/Manu) -- reused from earlier
 # plots for visual consistency.
@@ -123,15 +125,38 @@ p <- ggplot(plot_df, aes(x = null_stat)) +
   facet_wrap(~ direction, ncol = 1, scales = "free") +
   labs(
     x = expression(paste("null statistic (bootstrap resampled ", median(shuffled), ")")),
-    y = "count",
-    title = sprintf("Null distribution vs. observed statistic: %s vs. %s", model_a, model_b),
-    subtitle = sprintf("resample_size=%d, n_boot=%d  |  green line = observed real statistic", resample_size, n_boot)
+    y = "count"
   ) +
-  theme_minimal(base_size = 12) +
+  theme_publication(base_size = 12, legend_position = "right") +
   theme(strip.text = element_text(face = "bold"))
 
 #print(p)
-ggsave(output_path, p, width = 7, height = 8, dpi = 300)
+ggsave(output_path, p, width = 8.5, height = 6.5, dpi = 300, bg = "white")
+
+stats_summary <- list(
+  model_a = model_a,
+  model_b = model_b,
+  resample_size = resample_size,
+  n_boot = n_boot,
+  observed_df = observed_df
+)
+
+lines <- c(
+  sprintf("model_a=%s", stats_summary$model_a),
+  sprintf("model_b=%s", stats_summary$model_b),
+  sprintf("resample_size=%d", stats_summary$resample_size),
+  sprintf("n_boot=%d", stats_summary$n_boot)
+)
+for (i in seq_len(nrow(stats_summary$observed_df))) {
+  row <- stats_summary$observed_df[i, ]
+  lines <- c(
+    lines,
+    sprintf("direction=%s", row$direction),
+    sprintf("observed=%.6g", row$observed),
+    sprintf("p_value=%.6g", row$pvalue)
+  )
+}
+writeLines(lines, con = stats_output_path)
 
 cat("\n")
 print(observed_df[, c("direction", "observed", "pvalue")])
