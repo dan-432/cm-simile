@@ -151,5 +151,8 @@ func withCombineDefaults(ctx context.Context) context.Context {
 	if _, ok := ctx.Value("seed").(int); !ok {
 		ctx = context.WithValue(ctx, "seed", 1)
 	}
+	if _, ok := ctx.Value("cpu").(int); !ok {
+		ctx = context.WithValue(ctx, "cpu", 1)
+	}
 	return ctx
 }

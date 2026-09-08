@@ -145,7 +145,7 @@ func (m *ScoreMatrix) GetTopScorers(proportion float64, model string, seqIDs []s
 	if len(seqIDs) == 0 {
 		return nil, fmt.Errorf("matrix: GetTopScorers called with no sequence IDs")
 	}
-	if proportion < 0 || proportion > 1 {
+	if proportion <= 0 || proportion > 1 {
 		return nil, fmt.Errorf("matrix: GetTopScorers called with invalid proportion %f", proportion)
 	}
 
