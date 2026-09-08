@@ -40,18 +40,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 
-	"cmsimile/src/combine"
 	"cmsimile/src/infernal"
-	"cmsimile/src/matrix"
 	"cmsimile/src/output"
 	"cmsimile/src/pipeline"
-	"cmsimile/src/seqpool"
-	"cmsimile/src/stats"
 )
 
 // cmFlag accumulates repeated -cm name=path flags into a slice.
@@ -113,10 +107,6 @@ func runBitscoresumdifference() error {
 
 	keepTemp := flag.Bool("keep-temp", false, "keep temporary FASTA/tblout files instead of deleting them (for debugging a parsing mismatch against real Infernal output)")
 	quiet := flag.Bool("quiet", false, "suppress the run overview and progress bar (written to stderr; stdout/-out results are unaffected either way)")
-	combineFlag := flag.Bool("combine", false, "iteratively combine strongly overlapping model pairs and rerun comparisons until no qualifying pair remains")
-	combineThresholdMedian := flag.Float64("combine-threshold-median", 0.0, "combine trigger threshold on min(median_a_on_b, median_b_on_a); pairs at or above this are merge candidates")
-	combineTopProportion := flag.Float64("combine-top-proportion", 0.25, "fraction (0,1] of child real-pool sequences (ranked by score vs chosen parent) used when rebuilding the parent")
-	combineMaxRounds := flag.Int("combine-max-rounds", 100, "safety cap on combine rounds to prevent accidental non-termination")
 
 	flag.Parse()
 
@@ -148,9 +138,6 @@ func runBitscoresumdifference() error {
 
 	var queryFilter map[string]bool
 	if *query != "" {
-		if *combineFlag {
-			return fmt.Errorf("-combine currently does not support -query; combine mode evaluates and mutates the full model set each round")
-		}
 		queryFilter = make(map[string]bool)
 		for _, name := range strings.Split(*query, ",") {
 			name = strings.TrimSpace(name)
@@ -192,19 +179,9 @@ func runBitscoresumdifference() error {
 		cfg.OnProgress = pb.onProgress
 	}
 
-	ctx := context.Background()
-	var results []stats.PairStat
-	var warnings []string
-	if *combineFlag {
-		results, warnings, err = runBitscoreCombineLoop(ctx, cfg, workDir, *combineThresholdMedian, *combineTopProportion, *combineMaxRounds, *quiet)
-		if err != nil {
-			return err
-		}
-	} else {
-		results, warnings, err = pipeline.Run(ctx, cfg)
-		if err != nil {
-			return err
-		}
+	results, warnings, err := pipeline.Run(context.Background(), cfg)
+	if err != nil {
+		return err
 	}
 	for _, w := range warnings {
 		fmt.Fprintln(os.Stderr, "bitscoresumdifference: warning:", w)
@@ -220,196 +197,6 @@ func runBitscoresumdifference() error {
 		out = f
 	}
 	return output.WriteTSV(out, results)
-}
-
-type medianMergeCandidate struct {
-	Pair           stats.PairStat
-	ParentName     string
-	ChildName      string
-	ThresholdScore float64
-}
-
-func runBitscoreCombineLoop(
-	ctx context.Context,
-	baseCfg pipeline.Config,
-	workDir string,
-	thresholdMedian float64,
-	topProportion float64,
-	maxRounds int,
-	quiet bool,
-) ([]stats.PairStat, []string, error) {
-	if topProportion <= 0 || topProportion > 1 {
-		return nil, nil, fmt.Errorf("-combine-top-proportion must be in (0,1], got %.4f", topProportion)
-	}
-	if maxRounds <= 0 {
-		return nil, nil, fmt.Errorf("-combine-max-rounds must be > 0, got %d", maxRounds)
-	}
-
-	models := append([]pipeline.Model(nil), baseCfg.Models...)
-	var allWarnings []string
-	var lastResults []stats.PairStat
-
-	for round := 1; round <= maxRounds; round++ {
-		if len(models) < 2 {
-			break
-		}
-
-		cfg := baseCfg
-		cfg.Models = models
-		cfg.Query = nil
-
-		detailed, err := pipeline.RunDetailed(ctx, cfg)
-		if err != nil {
-			return nil, allWarnings, fmt.Errorf("combine round %d: %w", round, err)
-		}
-		allWarnings = append(allWarnings, detailed.Warnings...)
-		lastResults = detailed.Results
-
-		candidates := selectMedianMergeCandidates(detailed.Results, thresholdMedian)
-		if len(candidates) == 0 {
-			if !quiet {
-				fmt.Fprintf(os.Stderr, "bitscoresumdifference: combine round %d: no pairs met threshold %.4f; stopping\n", round, thresholdMedian)
-			}
-			break
-		}
-
-		selected := chooseDisjointMedianCandidates(candidates)
-		if len(selected) == 0 {
-			break
-		}
-
-		if !quiet {
-			fmt.Fprintf(os.Stderr, "bitscoresumdifference: combine round %d: merging %d pair(s)\n", round, len(selected))
-		}
-
-		next, err := applyMedianMergeRound(ctx, models, selected, detailed.RealPool, detailed.RealMatrix, workDir, topProportion, round)
-		if err != nil {
-			return nil, allWarnings, fmt.Errorf("combine round %d: %w", round, err)
-		}
-		models = next
-	}
-
-	if len(models) < 2 {
-		if !quiet {
-			fmt.Fprintln(os.Stderr, "bitscoresumdifference: combine mode collapsed model set to <2 models; no final pairwise output")
-		}
-		return nil, allWarnings, nil
-	}
-
-	finalCfg := baseCfg
-	finalCfg.Models = models
-	results, warnings, err := pipeline.Run(ctx, finalCfg)
-	if err != nil {
-		return nil, allWarnings, fmt.Errorf("final post-combine run: %w", err)
-	}
-	allWarnings = append(allWarnings, warnings...)
-	if len(results) == 0 {
-		results = lastResults
-	}
-	return results, allWarnings, nil
-}
-
-func selectMedianMergeCandidates(results []stats.PairStat, threshold float64) []medianMergeCandidate {
-	out := make([]medianMergeCandidate, 0)
-	for _, r := range results {
-		score := r.MedianScoreAonB
-		if r.MedianScoreBonA < score {
-			score = r.MedianScoreBonA
-		}
-		if score < threshold {
-			continue
-		}
-
-		parent := r.ModelA
-		child := r.ModelB
-		if r.StatAintoB >= r.StatBintoA {
-			parent = r.ModelB
-			child = r.ModelA
-		}
-
-		out = append(out, medianMergeCandidate{
-			Pair:           r,
-			ParentName:     parent,
-			ChildName:      child,
-			ThresholdScore: score,
-		})
-	}
-
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].ThresholdScore != out[j].ThresholdScore {
-			return out[i].ThresholdScore > out[j].ThresholdScore
-		}
-		if out[i].ParentName != out[j].ParentName {
-			return out[i].ParentName < out[j].ParentName
-		}
-		return out[i].ChildName < out[j].ChildName
-	})
-	return out
-}
-
-func chooseDisjointMedianCandidates(candidates []medianMergeCandidate) []medianMergeCandidate {
-	used := make(map[string]bool)
-	out := make([]medianMergeCandidate, 0, len(candidates))
-	for _, c := range candidates {
-		if used[c.ParentName] || used[c.ChildName] {
-			continue
-		}
-		used[c.ParentName] = true
-		used[c.ChildName] = true
-		out = append(out, c)
-	}
-	return out
-}
-
-func applyMedianMergeRound(
-	ctx context.Context,
-	models []pipeline.Model,
-	selected []medianMergeCandidate,
-	realPool *seqpool.Pool,
-	realMatrix *matrix.ScoreMatrix,
-	workDir string,
-	topProportion float64,
-	round int,
-) ([]pipeline.Model, error) {
-	byName := make(map[string]pipeline.Model, len(models))
-	for _, m := range models {
-		byName[m.Name] = m
-	}
-
-	replaced := make(map[string]pipeline.Model)
-	removed := make(map[string]bool)
-	for i, sel := range selected {
-		parent, ok := byName[sel.ParentName]
-		if !ok {
-			return nil, fmt.Errorf("combine: missing parent model %q", sel.ParentName)
-		}
-		child, ok := byName[sel.ChildName]
-		if !ok {
-			return nil, fmt.Errorf("combine: missing child model %q", sel.ChildName)
-		}
-
-		newName := combine.CombinedModelName(parent.Name, child.Name)
-		outPath := filepath.Join(workDir, fmt.Sprintf("combine_bitscore_round_%03d_%02d_%s.cm", round, i, combine.SafeFileStem(newName)))
-		if _, err := combine.CombineParentWithTopChild(ctx, parent.Path, outPath, parent.Name, child.Name, realPool, realMatrix, topProportion); err != nil {
-			return nil, fmt.Errorf("combine %s <- %s: %w", parent.Name, child.Name, err)
-		}
-
-		replaced[parent.Name] = pipeline.Model{Name: newName, Path: outPath}
-		removed[child.Name] = true
-	}
-
-	next := make([]pipeline.Model, 0, len(models)-len(removed))
-	for _, m := range models {
-		if removed[m.Name] {
-			continue
-		}
-		if repl, ok := replaced[m.Name]; ok {
-			next = append(next, repl)
-			continue
-		}
-		next = append(next, m)
-	}
-	return next, nil
 }
 
 // printOverview writes a summary of the run to w before any work starts:
