@@ -6,3 +6,5 @@
 /results/*
 *._DStore
 /bin
+zip_results_and_data.sh
+*.DS_Store

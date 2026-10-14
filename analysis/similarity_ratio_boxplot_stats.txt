@@ -1,0 +1,6 @@
+within_clan_n=27
+everything_else_n=919
+p_value=3.89764e-09
+p_text=Wilcoxon p = 3.9e-09
+n_text=n = 27 and 919
+summary_text=Within-clan n=27; other pairs n=919; Wilcoxon p = 3.9e-09

@@ -1,7 +1,7 @@
 package mafft
 
 import (
-	"bytes"
+	// "bytes"
 	"context"
 	"fmt"
 	"os"
@@ -33,19 +33,16 @@ func (a Aligner) Align(ctx context.Context, seqs []seqpool.Sequence, alignmentPa
 	defer os.Remove(tmpFasta.Name())
 
 	// Write the sequences to the temporary FASTA file
-
 	pool := seqpool.Pool{Sequences: seqs}
-	var fastaBuf bytes.Buffer
-	if err := pool.WriteFASTA(&fastaBuf); err != nil {
+
+	if err := pool.WriteFASTA(tmpFasta); err != nil {
 		return fmt.Errorf("mafft: writing temp FASTA: %w", err)
 	}
-	_, err = tmpFasta.Write(fastaBuf.Bytes())
-	if err != nil {
-		return fmt.Errorf("mafft: writing temp FASTA content: %w", err)
-	}
-	tmpFasta.Close()
 
 	args := []string{
+		"--localpair",
+		"--maxiterate",
+		"1000",
 		tmpFasta.Name(),
 	}
 
@@ -54,16 +51,18 @@ func (a Aligner) Align(ctx context.Context, seqs []seqpool.Sequence, alignmentPa
 		return fmt.Errorf("mafft: creating temp alignment FASTA: %w", err)
 	}
 	defer os.Remove(tmpAlignFasta.Name())
+	if err := tmpAlignFasta.Close(); err != nil {
+		return fmt.Errorf("mafft: closing temp alignment FASTA: %w", err)
+	}
+
 	// Run mafft and capture its output for debugging purposes, out is the stdout of mafft which is the aligned sequences in fasta format
-	err = runCapture(ctx, a.bin(), tmpAlignFasta.Name(), args...)
-	if err != nil {
+	if err := runCapture(ctx, a.bin(), tmpAlignFasta.Name(), args...); err != nil {
 		return fmt.Errorf("mafft against %s: %w", tmpFasta.Name(), err)
 	}
 
 	// reformat the aligned sequences to stockholm format using esl-reformat
 	reformatter := Reformatter{}
-	err = reformatter.Reformat(ctx, tmpAlignFasta.Name(), alignmentPath, "stockholm")
-	if err != nil {
+	if err := reformatter.Reformat(ctx, tmpAlignFasta.Name(), alignmentPath, "stockholm"); err != nil {
 		return fmt.Errorf("mafft: reformatting aligned sequences to stockholm format: %w", err)
 	}
 

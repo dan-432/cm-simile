@@ -1,0 +1,8 @@
+within_clan_n=27
+everything_else_n=919
+p_value=2.7591e-09
+auc=0.8353
+p_text=Wilcoxon p = 2.76e-09
+auc_text=AUC = 0.835
+n_text=n = 27 and 919
+summary_text=Within-clan n=27; other pairs n=919; AUC = 0.835; Wilcoxon p = 2.76e-09

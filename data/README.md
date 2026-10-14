@@ -8,3 +8,4 @@ wget -O Rfam.clanin https://ftp.ebi.ac.uk/pub/databases/Rfam/15.1/Rfam.clanin
 ```
 
 `Rfam.cm` can be passed directly to either tool's `-cm-file` flag; every named model inside is expanded automatically via `cmstat`/`cmfetch` (see the top-level README).
+

@@ -94,20 +94,31 @@ make_comparison_summary <- function(df, stat_col, comparison_col = "comparison")
     stop(sprintf("'%s' is not present in the data frame.", stat_col))
   }
 
+  # AUC below assumes within_clan is the first group in the Wilcoxon comparison
+  if (!identical(levels(df[[comparison_col]])[1], "within_clan")) {
+    stop("'within_clan' must be the first factor level of the comparison column.")
+  }
+
   wt <- wilcox.test(stats::as.formula(paste(stat_col, "~", comparison_col)), data = df)
   n_labels <- table(df[[comparison_col]])
+  n_within <- as.integer(n_labels["within_clan"])
+  n_other  <- as.integer(n_labels["everything_else"])
+
+  # W counts (within-clan, other) pairs where the within-clan score is higher
+  # (ties count 0.5), so W / (n1 * n2) is the AUC
+  auc <- unname(wt$statistic) / (n_within * n_other)
 
   list(
-    within_clan_n = as.integer(n_labels["within_clan"]),
-    everything_else_n = as.integer(n_labels["everything_else"]),
+    within_clan_n = n_within,
+    everything_else_n = n_other,
     p_value = wt$p.value,
+    auc = auc,
     p_text = sprintf("Wilcoxon p = %.3g", wt$p.value),
-    n_text = sprintf("n = %d and %d", n_labels["within_clan"], n_labels["everything_else"]),
+    auc_text = sprintf("AUC = %.3f", auc),
+    n_text = sprintf("n = %d and %d", n_within, n_other),
     summary_text = sprintf(
-      "Within-clan n=%d; other pairs n=%d; Wilcoxon p = %.3g",
-      n_labels["within_clan"],
-      n_labels["everything_else"],
-      wt$p.value
+      "Within-clan n=%d; other pairs n=%d; AUC = %.3f; Wilcoxon p = %.3g",
+      n_within, n_other, auc, wt$p.value
     )
   )
 }
@@ -122,7 +133,9 @@ write_comparison_summary <- function(summary, output_path) {
     sprintf("within_clan_n=%d", summary$within_clan_n),
     sprintf("everything_else_n=%d", summary$everything_else_n),
     sprintf("p_value=%.6g", summary$p_value),
+    sprintf("auc=%.4f", summary$auc),
     sprintf("p_text=%s", summary$p_text),
+    sprintf("auc_text=%s", summary$auc_text),
     sprintf("n_text=%s", summary$n_text),
     sprintf("summary_text=%s", summary$summary_text)
   )
@@ -168,6 +181,124 @@ plot_clan_boxplot <- function(df,
       fill = NULL
     ) +
     theme
+
+  if (!is.null(y_limits)) {
+    p <- p + scale_y_continuous(limits = y_limits)
+  }
+
+  if (!is.null(save_path)) {
+    dir.create(dirname(save_path), recursive = TRUE, showWarnings = FALSE)
+    ggsave(save_path, plot = p, width = width, height = height, dpi = dpi, bg = "white")
+  }
+
+  list(plot = p, summary = stats_summary)
+}
+
+plot_clan_box_dotplot <- function(df,
+                                  stat_col,
+                                  y_label,
+                                  title = NULL,
+                                  save_path = NULL,
+                                  stats_output_path = NULL,
+                                  width = 5.5,
+                                  height = 4.5,
+                                  dpi = 300,
+                                  box_width = 0.45,
+                                  point_width = 0.16,
+                                  point_size = 1.4,
+                                  point_alpha = 0.45,
+                                  y_limits = NULL,
+                                  fill_palette = publication_palette,
+                                  comparison_labels = publication_labels,
+                                  label_col = NULL,
+                                  theme = theme_publication()) {
+  if (!stat_col %in% names(df)) {
+    stop(sprintf("'%s' was not found in the input data frame.", stat_col))
+  }
+
+  if (!"comparison" %in% names(df)) {
+    stop("The input data frame must contain a 'comparison' column.")
+  }
+
+  stats_summary <- make_comparison_summary(df, stat_col = stat_col)
+  if (!is.null(stats_output_path)) {
+    write_comparison_summary(stats_summary, stats_output_path)
+  }
+
+  plot_df <- df
+  plot_df$plot_x <- as.numeric(plot_df$comparison)
+  for (group_index in seq_along(levels(plot_df$comparison))) {
+    rows <- which(
+      as.numeric(plot_df$comparison) == group_index &
+        !is.na(plot_df[[stat_col]])
+    )
+    if (length(rows) == 0) {
+      next
+    }
+
+    values <- plot_df[[stat_col]][rows]
+    if (length(rows) > 1 && diff(range(values)) > 0) {
+      density_fit <- density(values, from = 0, na.rm = TRUE)
+      density_at_value <- approx(
+        density_fit$x,
+        density_fit$y,
+        xout = pmax(values, 0),
+        rule = 2
+      )$y
+      density_fraction <- density_at_value / max(density_fit$y)
+    } else {
+      density_fraction <- rep(1, length(rows))
+    }
+
+    y_order <- order(values)
+    offsets <- rep(0, length(rows))
+    offsets[y_order] <- rep(c(0, -1, 1, -2, 2), length.out = length(rows)) *
+      point_width * pmin(density_fraction[y_order], 1)
+    plot_df$plot_x[rows] <- group_index + offsets
+  }
+
+  p <- ggplot(plot_df, aes(x = as.numeric(comparison), y = .data[[stat_col]], fill = comparison)) +
+    geom_violin(
+      width = 1,
+      trim = TRUE,
+      bounds = c(0, 2),
+      color = "#2d2d2d",
+      linewidth = 0.45,
+      alpha = 0.7
+    ) +
+    # geom_point(
+    #   data = plot_df[!is.na(plot_df[[stat_col]]), , drop = FALSE],
+    #   mapping = aes(x = plot_x, y = .data[[stat_col]], color = comparison),
+    #   size = point_size,
+    #   alpha = point_alpha,
+    #   shape = 16
+    # ) +
+    geom_beeswarm(alpha = point_alpha) +
+    scale_fill_manual(values = fill_palette, guide = "none") +
+    scale_color_manual(values = fill_palette, guide = "none") +
+    scale_x_continuous(
+      breaks = seq_along(levels(plot_df$comparison)),
+      labels = comparison_labels,
+      limits = c(0.75, length(levels(plot_df$comparison)) + 0.75)
+    ) +
+    labs(x = NULL, y = y_label, title = title, fill = NULL, color = NULL) +
+    theme
+
+  if (!is.null(label_col)) {
+    if (!label_col %in% names(plot_df)) {
+      stop(sprintf("'%s' was not found in the input data frame.", label_col))
+    }
+
+    label_df <- plot_df[!is.na(plot_df[[label_col]]) & plot_df[[label_col]] != "", , drop = FALSE]
+    p <- p + geom_text(
+      data = label_df,
+      aes(x = plot_x, y = .data[[stat_col]], label = .data[[label_col]]),
+      hjust = -0.05,
+      size = 2.6,
+      check_overlap = TRUE,
+      inherit.aes = TRUE
+    )
+  }
 
   if (!is.null(y_limits)) {
     p <- p + scale_y_continuous(limits = y_limits)
@@ -241,7 +372,7 @@ plot_heatmap <- function(df, group_col, stat_col, reverse_stat_col = NULL, order
     scale_x_discrete(drop = FALSE) +
     scale_y_discrete(drop = FALSE) +
     labs(x = NULL, y = NULL, title = title) +
-    theme_minimal(base_size = 12) +
+    theme_publication(base_size = 12, legend_position = "right") +
     theme(
       axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
       axis.text.y = element_text(hjust = 1, size = 7)

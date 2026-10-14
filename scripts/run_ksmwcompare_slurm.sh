@@ -18,10 +18,7 @@ set -euo pipefail
 # Config -- edit these per run
 # -------------------------------------------------------------------------
 # REPO_DIR is hardcoded (not derived from $SLURM_SUBMIT_DIR/$PWD) because
-# that's the exact failure mode that broke previous runs: sbatch can be
-# launched from inside scripts/, so $PWD resolves to .../cm-simile/scripts
-# rather than .../cm-simile, which leads to a failed Go build from the wrong
-# working directory. Keep this path in sync with the repo location.
+
 REPO_DIR="/projects/health_sciences/bms/biochemistry/gardner_group/daniel/cm-simile"
 RFAM_CM="${REPO_DIR}/data/Rfam.cm"
 CLANIN="${REPO_DIR}/data/Rfam.clanin"

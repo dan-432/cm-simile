@@ -15,9 +15,9 @@ input_path  <- "results/checkingbitsumdist/real_matrix.tsv"             # bitsco
 null_path <- "results/checkingbitsumdist/reservoir_matrix.tsv"             # bitscoresumdifference output
 
 modelA <- "SNORA17"
-modelB <- "Pyrobac-1"
+modelB <- "SNORA43" # "Pyrobac-1" #
 
-output_path <- sprintf("%s_%s_distribution.svg", modelA, modelB)
+output_path <- sprintf("%s_%s_distribution.pdf", modelA, modelB)
 stats_output_path <- sprintf("%s_%s_distribution_stats.txt", modelA, modelB)
 
 # Manu "Kea" palette (github.com/G-Thomson/Manu)
@@ -42,12 +42,12 @@ b_null_scores <- null_scores$score[null_scores$model == modelB & null_scores$ori
 
 ## --- plot ------------------------------------------------------------
 p <- ggplot() +
-  geom_density(aes(x = self_scores_a, color = "self_scores_a"), linewidth = 1, alpha = 0.7) +
-  geom_density(aes(x = self_scores_b, color = "self_scores_b"), linewidth = 1, alpha = 0.7) +
-  geom_density(aes(x = b_scored_on_model_a, color = "b_scored_on_model_a"), linewidth = 1) +
-  geom_density(aes(x = a_scored_on_model_b, color = "a_scored_on_model_b"), linewidth = 1) +
-  geom_density(aes(x = a_null_scores, color = "a_null_scores"), linewidth = 1) +
-  geom_density(aes(x = b_null_scores, color = "b_null_scores"), linewidth = 1) +
+  geom_density(aes(x = self_scores_a, color = "self_scores_a"), linewidth = 3, alpha = 0.7) +
+  geom_density(aes(x = self_scores_b, color = "self_scores_b"), linewidth = 3, alpha = 0.7) +
+  geom_density(aes(x = b_scored_on_model_a, color = "b_scored_on_model_a"), linewidth = 3) +
+  geom_density(aes(x = a_scored_on_model_b, color = "a_scored_on_model_b"), linewidth = 3) +
+  geom_density(aes(x = a_null_scores, color = "a_null_scores"), linewidth = 3) +
+  geom_density(aes(x = b_null_scores, color = "b_null_scores"), linewidth = 3) +
   scale_color_manual(values = c(
     self_scores_a = kea_palette[1],
     self_scores_b = kea_palette[3],
@@ -55,16 +55,37 @@ p <- ggplot() +
     a_scored_on_model_b = kea_palette[4],
     a_null_scores = kea_palette[6],
     b_null_scores = kea_palette[7]
+  ), labels = c(
+    self_scores_a = sprintf("%s self scores", modelA),
+    self_scores_b = sprintf("%s self scores", modelB),
+    b_scored_on_model_a = sprintf("%s scored on %s", modelB, modelA),
+    a_scored_on_model_b = sprintf("%s scored on %s", modelA, modelB),
+    a_null_scores = sprintf("%s null scores", modelA),
+    b_null_scores = sprintf("%s null scores", modelB)
   )) +
   labs(
     x = "Bit Score",
     y = "Density",
-    color = "Score Type"
+    color = NULL
   ) +
-  theme_publication(base_size = 12, legend_position = "right")
+  theme_publication(base_size = 36, legend_position = "bottom") +
+  theme(
+    axis.line = element_line(linewidth = 1.8),
+    axis.ticks = element_line(linewidth = 1.5),
+    legend.key.size = unit(1.65, "cm"),
+    legend.key = element_blank(),
+    legend.key.width = unit(2.5, "cm"),
+    legend.key.height = unit(0.7, "cm"),
+    legend.box = "horizontal"
+  ) +
+  guides(color = guide_legend(
+    nrow = 3,
+    byrow = TRUE,
+    override.aes = list(linewidth = 3, alpha = 1)
+  ))
 
 # Save the plot
-ggsave(output_path, p, width = 8.5, height = 5.5, dpi = 300, bg = "white")
+ggsave(output_path, p, width =16, height = 16, dpi = 300, bg = "white")
 
 
 # do a KS test between cross scores and null scores
@@ -112,12 +133,12 @@ writeLines(lines, con = stats_output_path)
 
 # plot culmulative distribution functions (CDFs) for null, cross scores and self scores
 cdf_self_plot <- ggplot() +
-  stat_ecdf(aes(x = b_scored_on_model_a, color = "b_scored_on_model_a"), linewidth = 1) +
-  stat_ecdf(aes(x = a_scored_on_model_b, color = "a_scored_on_model_b"), linewidth = 1) +
-  stat_ecdf(aes(x = self_scores_a, color = "self_scores_a"), linewidth = 1) +
-  stat_ecdf(aes(x = self_scores_b, color = "self_scores_b"), linewidth = 1) +
-  stat_ecdf(aes(x = a_null_scores, color = "a_null_scores"), linewidth = 1) +
-  stat_ecdf(aes(x = b_null_scores, color = "b_null_scores"), linewidth = 1) +
+  stat_ecdf(aes(x = b_scored_on_model_a, color = "b_scored_on_model_a"), linewidth = 3) +
+  stat_ecdf(aes(x = a_scored_on_model_b, color = "a_scored_on_model_b"), linewidth = 3) +
+  stat_ecdf(aes(x = self_scores_a, color = "self_scores_a"), linewidth = 3) +
+  stat_ecdf(aes(x = self_scores_b, color = "self_scores_b"), linewidth = 3) +
+  stat_ecdf(aes(x = a_null_scores, color = "a_null_scores"), linewidth = 3) +
+  stat_ecdf(aes(x = b_null_scores, color = "b_null_scores"), linewidth = 3) +
   scale_color_manual(values = c(
     b_scored_on_model_a = kea_palette[2],
     a_scored_on_model_b = kea_palette[4],
@@ -125,14 +146,35 @@ cdf_self_plot <- ggplot() +
     self_scores_b = kea_palette[3],
     a_null_scores = kea_palette[6],
     b_null_scores = kea_palette[7]
+  ), labels = c(
+    b_scored_on_model_a = sprintf("%s scored on %s", modelB, modelA),
+    a_scored_on_model_b = sprintf("%s scored on %s", modelA, modelB),
+    self_scores_a = sprintf("%s self scores", modelA),
+    self_scores_b = sprintf("%s self scores", modelB),
+    a_null_scores = sprintf("%s null scores", modelA),
+    b_null_scores = sprintf("%s null scores", modelB)
   )) +
   labs(
     x = "Bit Score",
     y = "Cumulative Distribution Function (CDF)",
-    color = "Score Type"
+    color = NULL
   ) +
-  theme_publication(base_size = 12, legend_position = "right")
+  theme_publication(base_size = 36, legend_position = "bottom") +
+  theme(
+    axis.line = element_line(linewidth = 1.8),
+    axis.ticks = element_line(linewidth = 1.5),
+    legend.key.size = unit(1.65, "cm"),
+    legend.key = element_blank(),
+    legend.key.width = unit(2.5, "cm"),
+    legend.key.height = unit(0.7, "cm"),
+    legend.box = "horizontal"
+  ) +
+  guides(color = guide_legend(
+    nrow = 3,
+    byrow = TRUE,
+    override.aes = list(linewidth = 3, alpha = 1)
+  ))
 
 # Save the CDF plot for cross vs self scores
-cdf_self_output_path <- sprintf("%s_%s_cdf_cross_vs_self.svg", modelA, modelB)
-ggsave(cdf_self_output_path, cdf_self_plot, width = 8.5, height = 5.5, dpi = 300, bg = "white")
+cdf_self_output_path <- sprintf("%s_%s_cdf_cross_vs_self.pdf", modelA, modelB)
+ggsave(cdf_self_output_path, cdf_self_plot, width = 16, height = 16, dpi = 300, bg = "white")

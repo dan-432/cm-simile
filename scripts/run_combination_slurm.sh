@@ -17,13 +17,9 @@ set -euo pipefail
 # -------------------------------------------------------------------------
 # Config -- edit these per run
 # -------------------------------------------------------------------------
-# REPO_DIR is hardcoded (not derived from $SLURM_SUBMIT_DIR/$PWD) because
-# that's the exact failure mode that broke previous runs: sbatch can be
-# launched from inside scripts/, so $PWD resolves to .../cm-simile/scripts
-# rather than .../cm-simile, which leads to a failed Go build from the wrong
-# working directory. Keep this path in sync with the repo location.
+
 REPO_DIR="/projects/health_sciences/bms/biochemistry/gardner_group/daniel/cm-simile"
-CM="${REPO_DIR}/data/all_clusters.cm"
+CM="${REPO_DIR}/data/all_clusters_an_mafft_aligned_combined_and_true_model.cm"
 BINARY="${REPO_DIR}/bin/ksmwcompare"
 BENCH_DIR="${REPO_DIR}/results/ksmwcompare_combine_${SLURM_JOB_ID}"
 NPOOL=300
@@ -56,17 +52,24 @@ if [ ! -x "$BINARY" ]; then
     go build -o "$BINARY" src/ksmwcompare.go
 fi
 
-mkdir -p "$BENCH_DIR/combined_models"
+# mkdir -p "$BENCH_DIR/combined_models"
 
 
 # -------------------------------------------------------------------------
 # run the ksmwcompare with combination mode over that population.
 # -------------------------------------------------------------------------
 
+# "$BINARY" -cm-file "$CM" \
+#     -npool "$NPOOL" -combine -combine-threshold-ks "$COMBINE_THRESHOLD_KS" -combine-top-proportion "$COMBINE_TOP_PROPORTION" \
+#     -out "$BENCH_DIR/ksmw-combine.tsv" \
+#     -combine-outdir "$BENCH_DIR/combined_models" \
+#     -n-null-pools "$N_NULL_POOLS" \
+#     -seed "$SEED" \
+#     -threads "$SLURM_CPUS_PER_TASK"
+
 "$BINARY" -cm-file "$CM" \
-    -npool "$NPOOL" -combine -combine-threshold-ks "$COMBINE_THRESHOLD_KS" -combine-top-proportion "$COMBINE_TOP_PROPORTION" \
-    -out "$BENCH_DIR/ksmw-combine.tsv" \
-    -combine-outdir "$BENCH_DIR/combined_models" \
+    -npool "$NPOOL" \
+    -out "$BENCH_DIR/ksmw-combined-analysis.tsv" \
     -n-null-pools "$N_NULL_POOLS" \
     -seed "$SEED" \
     -threads "$SLURM_CPUS_PER_TASK"
